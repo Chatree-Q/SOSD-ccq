@@ -208,6 +208,7 @@ class Tokenizer:
     
     def _bpe_merge(self, word_bytes: bytes) -> List[int]:
         """对单个预分词块应用所有合并规则"""
+        # 检查缓存
         if word_bytes in self.cache:
             return self.cache[word_bytes]
 
@@ -225,8 +226,24 @@ class Tokenizer:
             if pair not in self.merges:
                 break
             
-            new_id = self.encoder[self.decoder[pair[0]] + self.decoder[pair[1]]]
-            tokens = merge({tuple(tokens): 1}, pair, new_id)[0]
+            # 获取合并后的新 ID
+            # 注意：这里必须确保 pair 里的两个元素能组合出合法的 key
+            # self.decoder[pair[0]] + self.decoder[pair[1]] 还原回 bytes 组合
+            pair_bytes = self.decoder[pair[0]] + self.decoder[pair[1]]
+            new_id = self.encoder[pair_bytes]
+            
+        
+            new_tokens = []
+            i = 0
+            while i < len(tokens):
+                # 如果发现了要合并的 pair (tokens[i], tokens[i+1])
+                if i < len(tokens) - 1 and tokens[i] == pair[0] and tokens[i+1] == pair[1]:
+                    new_tokens.append(new_id)
+                    i += 2 # 跳过下一个，因为已经合并了
+                else:
+                    new_tokens.append(tokens[i])
+                    i += 1
+            tokens = new_tokens
         
         # 将结果存入缓存
         self.cache[word_bytes] = tokens
