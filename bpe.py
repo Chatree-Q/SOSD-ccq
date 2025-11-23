@@ -4,6 +4,7 @@ import re
 import regex # 使用第三方regex库以更好地支持\p{L}等Unicode属性
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+from functools import partial
 from typing import Dict, List, Tuple, Optional, Iterable, Iterator
 
 # --- 核心辅助函数 ---
@@ -98,10 +99,10 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
         
         # 使用 partial 来传递固定的 pat_str 参数（或者像下面这样用lambda/wrapper）
         # from functools import partial
-        # worker = partial(pretokenize_chunk, pat_str=PAT_STR)
+        worker = partial(pretokenize_chunk, pat_str=PAT_STR)
         
         chunk_freqs_list = list(tqdm(
-            pool.imap(lambda chunk: pretokenize_chunk(chunk, PAT_STR), work_chunks),
+            pool.imap(worker, work_chunks),
             total=len(work_chunks),
             desc="并行预分词"
         ))
@@ -139,8 +140,8 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
         word_freqs = merge_word_freqs(word_freqs, best_pair, next_token_id)
 
         # (d) 将 "AB" 添加到词汇表中
-        p1_bytes = vocab.get(best_pair[0], bytes([best_pair[0]]))
-        p2_bytes = vocab.get(best_pair[1], bytes([best_pair[1]]))
+        p1_bytes = vocab[best_pair[0]]
+        p2_bytes = vocab[best_pair[1]]
         vocab[next_token_id] = p1_bytes + p2_bytes
 
         # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
@@ -171,7 +172,8 @@ class Tokenizer:
         self.special_tokens = set(special_tokens) if special_tokens else set()
         self.special_pattern = None
         if self.special_tokens:
-            self.special_pattern = regex.compile("|".join(map(re.escape, self.special_tokens)))
+            pattern_str = "|".join(map(re.escape, self.special_tokens))
+            self.special_pattern = regex.compile(f"({pattern_str})")
             self.special_encoder = {token_str: self.encoder[token_str.encode("utf-8")] for token_str in self.special_tokens}
 
         # 缓存，用于加速编码
@@ -259,7 +261,8 @@ class Tokenizer:
             # re.split会保留分隔符，我们需要交替处理
             for i, chunk in enumerate(chunks):
                 if i % 2 == 1: # 这是特殊token
-                    token_ids.append(self.special_encoder[chunk])
+                    if chunk in self.special_encoder:
+                        token_ids.append(self.special_encoder[chunk])
                 else: # 这是普通文本
                     if chunk:
                         for word in self.pat.findall(chunk):
@@ -286,17 +289,17 @@ if __name__ == '__main__':
     import resource
 
     # 创建一个虚拟的训练文件
-    dummy_data_path = "TinyStoriesV2-GPT4-valid.txt"
-    with open(dummy_data_path, "w", encoding="utf-8") as f:
-        f.write("low low low low low\n")
-        f.write("lower lower widest widest widest\n")
-        f.write("newest newest newest newest newest newest\n")
-        f.write("This is a simple test for the BPE tokenizer. It should handle Unicode like 😊 and CJK characters like 你好世界。\n")
-
+    # dummy_data_path = "TinyStoriesV2-GPT4-valid.txt"
+    # with open(dummy_data_path, "w", encoding="utf-8") as f:
+    #     f.write("low low low low low\n")
+    #     f.write("lower lower widest widest widest\n")
+    #     f.write("newest newest newest newest newest newest\n")
+    #     f.write("This is a simple test for the BPE tokenizer. It should handle Unicode like 😊 and CJK characters like 你好世界。\n")
+    INPUT_PATH = "train1.txt"
     # 训练参数
     VOCAB_SIZE = 5000
     SPECIAL_TOKENS = ["<|endoftext|>"]
-    INPUT_PATH = dummy_data_path
+  
 
     # (a) 训练分词器
     print("开始训练BPE分词器...")
