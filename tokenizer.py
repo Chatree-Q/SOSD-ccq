@@ -177,7 +177,8 @@ class BPE_Tokenizer:
         self.special_pattern = None
         self.special_encoder = {}
         if self.special_tokens:
-            pattern_str = "|".join(map(re.escape, self.special_tokens))
+            sorted_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
+            pattern_str = "|".join(map(re.escape,sorted_special_tokens))
             self.special_pattern = regex.compile(f"({pattern_str})")
             # 建立特殊token的字符串到ID的映射
             for token_str in self.special_tokens:
