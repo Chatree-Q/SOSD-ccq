@@ -374,7 +374,7 @@ if __name__ == '__main__':
     # 保存训练结果
     VOCAB_FILE = "tinystories_vocab.json"
     MERGES_FILE = "tinystories_merges.txt"
-    tokenizer_for_saving = Tokenizer(vocab, merges, SPECIAL_TOKENS)
+    tokenizer_for_saving = BPE_Tokenizer(vocab, merges, SPECIAL_TOKENS)
     tokenizer_for_saving.save(VOCAB_FILE, MERGES_FILE)
     print(f"词汇表已保存到 {VOCAB_FILE}")
     print(f"合并规则已保存到 {MERGES_FILE}")
@@ -390,7 +390,7 @@ if __name__ == '__main__':
     print("\n--- Tokenizer 实验 ---")
     
     # 从文件加载分词器
-    tokenizer = Tokenizer.from_files(VOCAB_FILE, MERGES_FILE, SPECIAL_TOKENS)
+    tokenizer = BPE_Tokenizer.from_files(VOCAB_FILE, MERGES_FILE, SPECIAL_TOKENS)
     
     # 测试编码和解码
     text_to_test = "newest low lower 😊你好<|endoftext|>"
