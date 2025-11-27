@@ -1,7 +1,9 @@
+from __future__ import annotations
+import numpy as np
+
 import math
 import torch.nn.functional as F
 
-from __future__ import annotations
 
 import os
 from collections.abc import Iterable
@@ -557,7 +559,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
     return F.silu(in_features)
 
 
-import numpy as np
+
 def run_get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
