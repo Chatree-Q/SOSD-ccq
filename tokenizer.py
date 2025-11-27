@@ -315,13 +315,13 @@ class BPE_Tokenizer:
         return token_ids
 
     # --- 新增的方法：Problem 6 要求 ---
-    def encode_iterable(self, text_iterable: Iterable[str]) -> Iterator[List[int]]:
+    def encode_iterable(self, text_iterable: Iterable[str]) -> Iterator[int]:
         """
         对一个文本迭代器进行编码。
         这用于处理大型数据集，避免一次性加载所有文本。
         """
         for text in text_iterable:
-            yield self.encode(text)
+            yield from self.encode(text) #返回整数ID
 
     def decode(self, ids: List[int]) -> str:
         """将 token ID 列表解码为字符串"""
