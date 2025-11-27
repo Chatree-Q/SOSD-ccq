@@ -13,7 +13,7 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
+from tokenizer import BPE_Tokenizer
 
 def run_linear(
     d_in: int,
