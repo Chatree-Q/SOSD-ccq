@@ -1,3 +1,6 @@
+import math
+import torch.nn.functional as F
+
 from __future__ import annotations
 
 import os
@@ -28,8 +31,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    output = F.linear(in_features, weights, bias=None)
 
-    raise NotImplementedError
+    return output
 
 
 def run_embedding(
@@ -50,8 +54,8 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    output = F.embedding(token_ids, weights)
+    return output
 
 
 def run_swiglu(
@@ -83,7 +87,11 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    x = F.linear(in_features, w1_weight)  
+    y = F.linear(in_features, w3_weight)  
+    gated = F.silu(x) * y  # 定义gated
+    output = F.linear(gated, w2_weight)
+    return output
 
 
 def run_scaled_dot_product_attention(
@@ -104,7 +112,17 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    d_k = Q.size(-1)
+    attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)  # [..., queries, keys]
+    
+    # 应用mask（True位置设为-∞，避免softmax后被选中）
+    if mask is not None:
+        attn_scores = attn_scores.masked_fill(mask, -1e9)
+    
+    # softmax归一化 + 乘V
+    attn_weights = F.softmax(attn_scores, dim=-1)
+    output = torch.matmul(attn_weights, V)  # [..., queries, d_v]
+    return output
 
 
 def run_multihead_self_attention(
@@ -138,7 +156,31 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+     batch_dims = in_features.shape[:-2]
+    seq_len = in_features.size(-2)
+    d_in = in_features.size(-1)
+    d_k = q_proj_weight.size(0) // num_heads  # 每个head的维度
+    d_v = v_proj_weight.size(0) // num_heads
+    
+    # 1. QKV投影
+    Q = F.linear(in_features, q_proj_weight)  # [..., seq_len, num_heads*d_k]
+    K = F.linear(in_features, k_proj_weight)  # [..., seq_len, num_heads*d_k]
+    V = F.linear(in_features, v_proj_weight)  # [..., seq_len, num_heads*d_v]
+    
+    # 2. 分拆heads：[..., seq_len, num_heads, d_k/d_v] → [..., num_heads, seq_len, d_k/d_v]
+    Q = Q.view(*batch_dims, seq_len, num_heads, d_k).transpose(-3, -2)
+    K = K.view(*batch_dims, seq_len, num_heads, d_k).transpose(-3, -2)
+    V = V.view(*batch_dims, seq_len, num_heads, d_v).transpose(-3, -2)
+    
+    # 3. 缩放点积注意力
+    attn_output = run_scaled_dot_product_attention(Q, K, V)  # [..., num_heads, seq_len, d_v]
+    
+    # 4. 拼接heads：[..., num_heads, seq_len, d_v] → [..., seq_len, num_heads*d_v]
+    attn_output = attn_output.transpose(-3, -2).contiguous().view(*batch_dims, seq_len, num_heads*d_v)
+    
+    # 5. 输出投影
+    output = F.linear(attn_output, o_proj_weight)  # [..., seq_len, d_model]
+    return output
 
 
 def run_multihead_self_attention_with_rope(
@@ -178,7 +220,37 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    batch_dims = in_features.shape[:-2]
+    seq_len = in_features.size(-2)
+    d_in = in_features.size(-1)
+    d_k = q_proj_weight.size(0) // num_heads
+    d_v = v_proj_weight.size(0) // num_heads
+    
+    # 1. QKV投影
+    Q = F.linear(in_features, q_proj_weight)
+    K = F.linear(in_features, k_proj_weight)
+    V = F.linear(in_features, v_proj_weight)
+    
+    # 2. 分拆heads
+    Q = Q.view(*batch_dims, seq_len, num_heads, d_k).transpose(-3, -2)  # [..., num_heads, seq_len, d_k]
+    K = K.view(*batch_dims, seq_len, num_heads, d_k).transpose(-3, -2)
+    V = V.view(*batch_dims, seq_len, num_heads, d_v).transpose(-3, -2)
+    
+    # 3. 对Q/K应用RoPE（需调整RoPE输入形状适配多头）
+    if token_positions is None:
+        token_positions = torch.arange(seq_len, device=in_features.device).expand(*batch_dims, seq_len)
+    # RoPE输入形状：[..., num_heads, seq_len, d_k] → 合并batch和heads维度，方便调用run_rope
+    Q_rope = Q.flatten(0, -3)  # [batch*num_heads, seq_len, d_k]
+    K_rope = K.flatten(0, -3)
+    token_positions_rope = token_positions.unsqueeze(1).expand(*batch_dims, num_heads, seq_len).flatten(0, -2)
+    Q = run_rope(d_k, theta, max_seq_len, Q_rope, token_positions_rope).view_as(Q)
+    K = run_rope(d_k, theta, max_seq_len, K_rope, token_positions_rope).view_as(K)
+    
+    # 4. 缩放点积注意力 + 拼接heads + 输出投影（同普通多头注意力）
+    attn_output = run_scaled_dot_product_attention(Q, K, V)
+    attn_output = attn_output.transpose(-3, -2).contiguous().view(*batch_dims, seq_len, num_heads*d_v)
+    output = F.linear(attn_output, o_proj_weight)
+    return output
 
 
 def run_rope(
@@ -200,7 +272,24 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+     # 生成频率矩阵：theta^(2i/d_k)
+    freqs = 1.0 / (theta ** (torch.arange(0, d_k, 2)[: (d_k // 2)] / d_k))  # [d_k//2]
+    # 生成位置编码：pos * freq
+    seq_len = in_query_or_key.size(-2)
+    positions = token_positions.unsqueeze(-1)  # [..., seq_len, 1]
+    freqs = freqs.unsqueeze(0)  # [1, d_k//2]
+    pos_freqs = positions * freqs  # [..., seq_len, d_k//2]
+    # 生成cos/sin矩阵
+    cos = pos_freqs.cos()
+    sin = pos_freqs.sin()
+    # 旋转奇数位置，保留偶数位置
+    qk_even = in_query_or_key[..., ::2]  # [..., seq_len, d_k//2]
+    qk_odd = in_query_or_key[..., 1::2]  # [..., seq_len, d_k//2]
+    rotated_even = qk_even * cos - qk_odd * sin
+    rotated_odd = qk_even * sin + qk_odd * cos
+    # 拼接结果
+    output = torch.stack([rotated_even, rotated_odd], dim=-1).flatten(-2)  # [..., seq_len, d_k]
+    return output
 
 
 def run_transformer_block(
@@ -273,7 +362,38 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+     # 1. 第一层RMSNorm
+    ln1_out = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln1.weight"], in_features=in_features)
+    
+    # 2. 多头自注意力（带RoPE）+ 残差连接
+    attn_out = run_multihead_self_attention_with_rope(
+        d_model=d_model,
+        num_heads=num_heads,
+        max_seq_len=max_seq_len,
+        theta=theta,
+        q_proj_weight=weights["attn.q_proj.weight"],
+        k_proj_weight=weights["attn.k_proj.weight"],
+        v_proj_weight=weights["attn.v_proj.weight"],
+        o_proj_weight=weights["attn.output_proj.weight"],
+        in_features=ln1_out,
+    )
+    residual1 = in_features + attn_out
+    
+    # 3. 第二层RMSNorm
+    ln2_out = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln2.weight"], in_features=residual1)
+    
+    # 4. SwiGLU FFN + 残差连接
+    ffn_out = run_swiglu(
+        d_model=d_model,
+        d_ff=d_ff,
+        w1_weight=weights["ffn.w1.weight"],
+        w2_weight=weights["ffn.w2.weight"],
+        w3_weight=weights["ffn.w3.weight"],
+        in_features=ln2_out,
+    )
+    output = residual1 + ffn_out
+    
+    return output
 
 
 def run_transformer_lm(
@@ -355,7 +475,45 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    # 1. Token Embedding
+    token_embeds = run_embedding(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        weights=weights["token_embeddings.weight"],
+        token_ids=in_indices,
+    )
+    
+    # 2. 逐层Transformer Block
+    x = token_embeds
+    for layer_idx in range(num_layers):
+        layer_weights = {
+            "attn.q_proj.weight": weights[f"layers.{layer_idx}.attn.q_proj.weight"],
+            "attn.k_proj.weight": weights[f"layers.{layer_idx}.attn.k_proj.weight"],
+            "attn.v_proj.weight": weights[f"layers.{layer_idx}.attn.v_proj.weight"],
+            "attn.output_proj.weight": weights[f"layers.{layer_idx}.attn.output_proj.weight"],
+            "ln1.weight": weights[f"layers.{layer_idx}.ln1.weight"],
+            "ffn.w1.weight": weights[f"layers.{layer_idx}.ffn.w1.weight"],
+            "ffn.w2.weight": weights[f"layers.{layer_idx}.ffn.w2.weight"],
+            "ffn.w3.weight": weights[f"layers.{layer_idx}.ffn.w3.weight"],
+            "ln2.weight": weights[f"layers.{layer_idx}.ln2.weight"],
+        }
+        x = run_transformer_block(
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            max_seq_len=context_length,
+            theta=rope_theta,
+            weights=layer_weights,
+            in_features=x,
+        )
+    
+    # 3. 最终RMSNorm
+    ln_final_out = run_rmsnorm(d_model, eps=1e-5, weights=weights["ln_final.weight"], in_features=x)
+    
+    # 4. LM Head（映射到vocab_size）
+    logits = F.linear(ln_final_out, weights["lm_head.weight"])
+    
+    return logits
 
 
 def run_rmsnorm(
@@ -378,7 +536,11 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    # 计算RMS（均方根）
+    rms = torch.sqrt(torch.mean(in_features ** 2, dim=-1, keepdim=True) + eps)
+    # 归一化 + 缩放（weights是γ）
+    output = in_features / rms * weights
+    return output
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -392,9 +554,10 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    return F.silu(in_features)
 
 
+import numpy as np
 def run_get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -415,7 +578,13 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    # 随机采样batch_size个起始位置
+    ix = np.random.randint(0, len(dataset) - context_length, size=batch_size)
+    # 生成x（输入序列）和y（标签序列）
+    x = torch.stack([torch.from_numpy(dataset[i:i+context_length]) for i in ix])
+    y = torch.stack([torch.from_numpy(dataset[i+1:i+context_length+1]) for i in ix])
+    # 移到指定设备
+    return x.to(device), y.to(device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -431,7 +600,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return F.softmax(in_features, dim=dim)
 
 
 def run_cross_entropy(
@@ -449,7 +618,10 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    # cross_entropy默认会对输入做softmax，且计算平均损失
+    loss = F.cross_entropy(inputs, targets)
+    return loss
+
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -461,14 +633,15 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    torch.nn.utils.clip_grad_norm_(parameters, max_l2_norm)
+
 
 
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return torch.optim.AdamW
 
 
 def run_get_lr_cosine_schedule(
@@ -496,7 +669,17 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    # 1. 热身阶段：线性增长
+    if it < warmup_iters:
+        return max_learning_rate * (it + 1) / warmup_iters
+    # 2. 余弦衰减阶段
+    if it > warmup_iters + cosine_cycle_iters:
+        return min_learning_rate
+    # 计算余弦位置
+    progress = (it - warmup_iters) / cosine_cycle_iters
+    lr = min_learning_rate + 0.5 * (max_learning_rate - min_learning_rate) * (1 + math.cos(math.pi * progress))
+    return lr
+
 
 
 def run_save_checkpoint(
@@ -515,7 +698,12 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+    torch.save(checkpoint, out)
 
 
 def run_load_checkpoint(
@@ -536,7 +724,11 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+     checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    return checkpoint["iteration"]
+
 
 
 def get_tokenizer(
@@ -559,7 +751,28 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return BPE_Tokenizer(vocab, merges, special_tokens)
+
+
+from collections import defaultdict
+
+def get_stats(ids, counts=None):
+    counts = defaultdict(int) if counts is None else counts
+    for pair in zip(ids[:-1], ids[1:]):
+        counts[pair] += 1
+    return counts
+
+def merge(ids, pair, idx):
+    new_ids = []
+    i = 0
+    while i < len(ids):
+        if i < len(ids) - 1 and ids[i] == pair[0] and ids[i+1] == pair[1]:
+            new_ids.append(idx)
+            i += 2
+        else:
+            new_ids.append(ids[i])
+            i += 1
+    return new_ids
 
 
 def run_train_bpe(
@@ -589,4 +802,40 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+     # 1. 读取文本
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    
+    # 2. 初始词汇表：256个字节 + 特殊token
+    vocab = {i: bytes([i]) for i in range(256)}
+    special_token_ids = {}
+    for i, token in enumerate(special_tokens):
+        idx = 256 + i
+        vocab[idx] = token.encode("utf-8")
+        special_token_ids[token] = idx
+    num_special = len(special_tokens)
+    num_merges = vocab_size - 256 - num_special
+    
+    # 3. 文本转字节ID
+    bytes_ = text.encode("utf-8")
+    ids = list(bytes_)
+    
+    # 4. 迭代合并
+    merges = []
+    counts = get_stats(ids)
+    for _ in range(num_merges):
+        if not counts:
+            break
+        # 找频率最高的pair
+        pair = max(counts, key=counts.get)
+        # 分配新ID
+        new_idx = 256 + num_special + len(merges)
+        # 合并ID
+        ids = merge(ids, pair, new_idx)
+        # 更新vocab和merges
+        vocab[new_idx] = vocab[pair[0]] + vocab[pair[1]]
+        merges.append(pair)
+        # 更新统计
+        counts = get_stats(ids, counts)
+    
+    return vocab, merges
