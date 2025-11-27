@@ -155,7 +155,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
 # --- Problem 5: Tokenizer 类实现 ---
 
-class Tokenizer:
+class BPE_Tokenizer:
     def __init__(self, vocab: Dict[int, bytes], merges: List[Tuple[bytes, bytes]], special_tokens: Optional[List[str]] = None):
         self.vocab = vocab
         self.merges = {tuple(pair): i for i, pair in enumerate(merges)} # 将merges转为dict以便快速查找和排序
