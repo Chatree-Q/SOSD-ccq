@@ -13,6 +13,11 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+
+import sys
+import os
+# 将当前文件的父目录（即项目根目录）加入 sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokenizer import BPE_Tokenizer
 
 def run_linear(
