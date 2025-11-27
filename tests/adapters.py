@@ -156,7 +156,7 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-     batch_dims = in_features.shape[:-2]
+    batch_dims = in_features.shape[:-2]
     seq_len = in_features.size(-2)
     d_in = in_features.size(-1)
     d_k = q_proj_weight.size(0) // num_heads  # 每个head的维度
@@ -724,7 +724,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-     checkpoint = torch.load(src)
+    checkpoint = torch.load(src)
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return checkpoint["iteration"]
