@@ -9,46 +9,60 @@ from typing import Dict, List, Tuple, Optional, Iterable, Iterator
 
 # --- 核心辅助函数 ---
 
-def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
+def bytes_to_unicode():
+    """GPT-2的字节到Unicode字符映射，避免控制字符问题"""
+    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("¡"), ord("¬")+1)) + list(range(ord("®"), ord("ÿ")+1))
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+# 全局映射表
+byte_to_unicode = bytes_to_unicode()
+unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
+
+#def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
     """
     从词频字典中高效地计算所有相邻字节对的频率。
     这是优化的关键：我们不遍历整个文本，而是遍历词汇表并乘以其频率。
     """
-    stats = {}
-    for word, freq in word_freqs.items():
-        for i in range(len(word) - 1):
-            pair = (word[i], word[i+1])
-            stats[pair] = stats.get(pair, 0) + freq
-    return stats
+    #stats = {}
+    #for word, freq in word_freqs.items():
+    #    for i in range(len(word) - 1):
+     #       pair = (word[i], word[i+1])
+      #      stats[pair] = stats.get(pair, 0) + freq
+    #return stats
 
-def merge_word_freqs(word_freqs: Dict[Tuple[int, ...], int], pair: Tuple[int, int], new_id: int) -> Dict[Tuple[int, ...], int]:
-    """
-    在词频字典的所有词中，执行一次合并操作。
-    这也是优化的关键：我们不修改一个巨大的列表，而是创建一个新的词频字典。
-    """
+def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tuple[str, str], new_char: str) -> Dict[Tuple[str, ...], int]:
     new_word_freqs = {}
-    p1, p2 = pair
     for word, freq in word_freqs.items():
         new_word = []
         i = 0
         while i < len(word):
-            if i < len(word) - 1 and word[i] == p1 and word[i+1] == p2:
-                new_word.append(new_id)
+            if i < len(word)-1 and (word[i], word[i+1]) == pair:
+                new_word.append(new_char)
                 i += 2
             else:
                 new_word.append(word[i])
                 i += 1
-        new_word_freqs[tuple(new_word)] = freq
+        new_word_freqs[tuple(new_word)] = new_word_freqs.get(tuple(new_word), 0) + freq
     return new_word_freqs
 
-def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[int, ...], int]:
-    """并行化预分词的工作函数"""
+
+def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[str, ...], int]:
+    """并行化预分词的工作函数（返回Unicode字符tuple的词频）"""
     pat = regex.compile(pat_str)
     word_freqs = {}
-    # 使用 regex.findall 而不是 re.findall
     for word_str in pat.findall(text_chunk):
-        word_bytes = tuple(word_str.encode("utf-8"))
-        word_freqs[word_bytes] = word_freqs.get(word_bytes, 0) + 1
+        # 将word_str转为字节，再映射为Unicode字符序列
+        word_bytes = word_str.encode("utf-8")
+        word_chars = tuple(byte_to_unicode[b] for b in word_bytes)
+        word_freqs[word_chars] = word_freqs.get(word_chars, 0) + 1
     return word_freqs
 
 
@@ -72,11 +86,13 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
     # 1. 词汇表初始化 (Vocabulary initialization)
     vocab = {i: bytes([i]) for i in range(256)}
+    next_token_id = 256
     for i, token_str in enumerate(special_tokens):
         # 将特殊token放在词汇表的末尾，ID从vocab_size-1开始递减
         # 这样可以确保它们不会与合并的token ID冲突
-        token_id = vocab_size - 1 - i
-        vocab[token_id] = token_str.encode("utf-8")
+        vocab[next_token_id] = token_str.encode("utf-8")
+        next_token_id += 1
+
 
     # GPT-2的正则表达式
     PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -113,40 +129,93 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
     for chunk_freqs in chunk_freqs_list:
         for word, freq in chunk_freqs.items():
             word_freqs[word] = word_freqs.get(word, 0) + freq
+            
+    def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
+        stats = {}
+        for word, freq in word_freqs.items():
+            for i in range(len(word)-1):
+                pair = (word[i], word[i+1])
+                stats[pair] = stats.get(pair, 0) + freq
+        return stats
+            
+    stats = init_pair_stats(word_freqs)  # 只执行一次，初始化所有pair的频率
+    
+
 
     # 3. 计算 BPE 合并 (Compute BPE merges)
-    num_merges = vocab_size - len(vocab)
+    num_merges = vocab_size - len(vocab) 
     merges_list = []  # 使用列表来保证顺序
     
-    # 词汇表的ID从256开始增长
-    next_token_id = 256
+    bpe_merges = {}  # 记录合并规则：(char1, char2) -> new_char
+
     
     pbar = tqdm(range(num_merges), desc="BPE 合并")
     for i in pbar:
         # (a) 统计所有相邻 token 对的频率
-        stats = get_pair_stats_optimized(word_freqs)
         if not stats:
             print("没有更多的对可以合并，提前停止。")
             break
 
         # (b) 找到频率最高的 token 对，并处理平局
-        # 频率越高越优先(-item[1])，频率相同时 pair 越小越优先(item[0])
-        best_pair = min(stats.items(), key=lambda item: (-item[1], item[0]))[0]
+        # 修正排序规则：频率高优先，频率相同按Unicode字符顺序
+        best_pair = max(stats.items(), key=lambda x: (x[1], x[0]))[0]
+        
+         # 生成新的合并字符（如'Ġt'）
+        new_char = best_pair[0] + best_pair[1]
+        bpe_merges[best_pair] = new_char
 
-        # (c) 用一个新的 token "AB" 替换所有 ("A", "B") 对
-        word_freqs = merge_word_freqs(word_freqs, best_pair, next_token_id)
+         #（c） 增量更新word_freqs和stats
+        word_freqs = merge_word_freqs_optimized(word_freqs, best_pair, new_char)
+         # ========== 新增：增量更新stats（只更新受影响的pair） ==========
+        def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char: str, 
+                      stats: Dict[Tuple[str, str], int], freq: int):
+            i = 0
+            while i < len(word)-1:
+                if (word[i], word[i+1]) == old_pair:
+                    # 移除旧pair的频率
+                    if old_pair in stats:
+                        stats[old_pair] -= freq
+                        if stats[old_pair] <= 0:
+                            del stats[old_pair]
+                    # 更新左侧相邻对
+                    if i > 0:
+                        left_pair = (word[i-1], new_char)
+                        stats[left_pair] = stats.get(left_pair, 0) + freq
+                        old_left = (word[i-1], word[i])
+                        stats[old_left] -= freq
+                        if stats[old_left] <= 0:
+                            del stats[old_left]
+                    # 更新右侧相邻对
+                    if i+2 < len(word):
+                        right_pair = (new_char, word[i+2])
+                        stats[right_pair] = stats.get(right_pair, 0) + freq
+                        old_right = (word[i+1], word[i+2])
+                        stats[old_right] -= freq
+                        if stats[old_right] <= 0:
+                            del stats[old_right]
+                    i += 2
+                else:
+                    i += 1
+        for word, freq in word_freqs.items():
+            update_pair_stats(word, best_pair, new_char, stats, freq)
+
 
         # (d) 将 "AB" 添加到词汇表中
-        p1_bytes = vocab[best_pair[0]]
-        p2_bytes = vocab[best_pair[1]]
-        vocab[next_token_id] = p1_bytes + p2_bytes
+        
+        p1_bytes = bytes([unicode_to_byte[c] for c in best_pair[0]])
+        p2_bytes = bytes([unicode_to_byte[c] for c in best_pair[1]])
+        merges_list.append((p1_bytes, p2_bytes))
+
 
         # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
-        merges_list.append((p1_bytes, p2_bytes))
+         # 更新vocab（new_char转回bytes）
+        new_char_bytes = bytes([unicode_to_byte[c] for c in new_char])
+        vocab[next_token_id] = new_char_bytes
         
         next_token_id += 1
 
     return vocab, merges_list
+   
 
 
 # --- Problem 5: Tokenizer 类实现 (已修正) ---
