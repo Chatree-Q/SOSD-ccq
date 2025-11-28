@@ -12,14 +12,23 @@ from collections import defaultdict
 
 def bytes_to_unicode():
     """复现GPT-2的bytes_to_unicode映射逻辑"""
-    # 步骤1：收集可打印ASCII字符（33-126）
-    chars = [chr(i) for i in range(33, 127)]
-    # 步骤2：补充ASCII中未包含的字符（0-32、127）
-    chars += ['\u0000', '\u0001', ..., '\u001F', '\u007F']  # 示例，需完整覆盖
-    # 步骤3：处理128-255字节，映射到Unicode私有区域
-    chars += [chr(i + 0x100) for i in range(128)]  # 示例，确保无冲突
+   # 第一步：收集可打印ASCII字符（33-126）和Latin-1可打印字符（161-255）
+    chars = []
+    for i in range(ord('!'), ord('~') + 1):
+        chars.append(chr(i))
+    for i in range(ord('¡'), ord('¬') + 1):
+        chars.append(chr(i))
+    for i in range(ord('®'), ord('ÿ') + 1):
+        chars.append(chr(i))
     
-    # 生成映射：字节值 -> 对应Unicode字符
+    # 第二步：补充剩余字符（用特殊符号填充，确保总长度256）
+    n = 0
+    while len(chars) < 256:
+        if n not in chars:  # 避免重复
+            chars.append(chr(n))
+        n += 1
+    
+    # 第三步：生成0-255到chars的映射
     byte_to_char = {i: chars[i] for i in range(256)}
     return byte_to_char
 
@@ -121,136 +130,71 @@ def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char
 
 # --- Problem 3: BPE 训练函数 ---
 
-# 修复 1: 把函数定义放在一行，解决了 SyntaxError
-def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
-    """
-    训练一个字节级的BPE分词器。
-
-    Args:
-        input_path: 训练数据路径。
-        vocab_size: 目标词汇表大小。
-        special_tokens: 特殊token列表。
-
-    Returns:
-        A tuple containing:
-            - vocab: 从token ID到其字节序列的映射。
-            - merges: 按创建顺序列出的BPE合并规则。
-    """
-
-    # 1. 词汇表初始化 (Vocabulary initialization)
-    vocab = {i: bytes([i]) for i in range(256)}
-    next_token_id = 256
-    for token_str in special_tokens:
-        vocab[next_token_id] = token_str.encode("utf-8")
-        next_token_id += 1
 
 
-    # GPT-2的正则表达式
-    PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+def train_bpe(data, vocab_size, special_tokens):
+    # 初始化：文本转字节序列（整数列表，如"new" → [110, 101, 119]）
+    tokens = list(data.encode('utf-8'))
     
-    # 读取语料库
-    with open(input_path, 'r', encoding='utf-8') as f:
-        text = f.read()
+    # 初始化vocab：特殊token → ID（优先），单字节 → ID
+    vocab = {}
+    # 1. 添加特殊token
+    for idx, token in enumerate(special_tokens):
+        vocab[token.encode('utf-8')] = idx  # 特殊token转bytes作为键
+    # 2. 添加单字节token（0-255）
+    next_token_id = len(special_tokens)
+    for byte in range(256):
+        vocab[bytes([byte])] = next_token_id
+        next_token_id += 1
+    
+    merges = []  # 最终存储(bytes, bytes)格式的合并规则
+    pair_freq = defaultdict(int)
+    
+    # 初始化pair频率
+    for i in range(len(tokens)-1):
+        pair = (tokens[i], tokens[i+1])
+        pair_freq[pair] += 1
 
-    # 2. 预分词 (Pre-tokenization)
-    # 首先按特殊token分割语料库
-    work_chunks = []
-    if special_tokens:
-        # 构建特殊token的正则（转义+或连接）
-        special_pattern = "|".join(map(re.escape, special_tokens))
-        # 分割文本：保留特殊token作为独立块
-        text_chunks = re.split(f"({special_pattern})", text)
-        # 过滤空块，区分特殊token和普通文本
-        for chunk in text_chunks:
-            if not chunk:
-                continue
-            if chunk in special_tokens:
-                # 特殊token直接作为独立块
-                work_chunks.append(("special", chunk))
+    while len(vocab) < vocab_size and pair_freq:
+        # 1. 找频率最高的pair（整数对）
+        best_pair = max(pair_freq, key=pair_freq.get)  # 如(101, 32)
+        
+        # 2. 将best_pair转为bytes对，加入merges（匹配测试格式）
+        p1_bytes = bytes([best_pair[0]])
+        p2_bytes = bytes([best_pair[1]])
+        merges.append((p1_bytes, p2_bytes))  # 直接存bytes对，无需后续转换
+        
+        # 3. 新增合并后的token到vocab
+        merged_token = p1_bytes + p2_bytes  # 合并后的bytes，如b'e '
+        vocab[merged_token] = next_token_id
+        next_token_id += 1
+        
+        # 4. 合并token序列（整数列表）
+        new_tokens = []
+        i = 0
+        while i < len(tokens):
+            if i < len(tokens)-1 and (tokens[i], tokens[i+1]) == best_pair:
+                # 用合并后的token的ID？不，这里继续用整数表示（或用新ID，看逻辑）
+                # 注意：如果后续统计需要，这里可以用新ID，但更简单的是暂时用tuple标记，最后统一转bytes
+                new_tokens.append(best_pair)  # 或用next_token_id-1（刚分配的ID）
+                i += 2
             else:
-                # 普通文本作为预分词块
-                work_chunks.append(("text", chunk))
-    else:
-        # 无特殊token时直接用全文
-        work_chunks = [("text", text)]
-
-    # 定义块处理函数
-    def process_chunk(chunk):
-        chunk_type, chunk_content = chunk
-        if chunk_type == "special":
-            # 特殊token转为Unicode字符tuple（不拆分）
-            token_bytes = chunk_content.encode("utf-8")
-            token_chars = tuple(byte_to_unicode[b] for b in token_bytes)
-            return {token_chars: 1}
-        else:
-            # 普通文本预分词
-            return pretokenize_chunk(chunk_content, PAT_STR)
-
-    # 修复 2: 修正了 if/else 的缩进问题
-    # 如果数据量很小（比如测试用的 corpus.en 只有几KB），强制单进程
-    if len(text) >= 5_000_000: # 大文件才用多进程
-        num_procs = min(cpu_count(), os.cpu_count() or 1)
-        with Pool(num_procs) as pool:
-            chunk_freqs_list = list(tqdm(
-                pool.imap(process_chunk, work_chunks),
-                total=len(work_chunks),
-                desc="并行处理块"
-            ))
-    else: # 小文件单进程
-        chunk_freqs_list = [process_chunk(chunk) for chunk in work_chunks]
-
-    
-    # 合并所有进程的结果
-    word_freqs = defaultdict(int)
-    for chunk_freq in chunk_freqs_list:
-        for word, freq in chunk_freq.items():
-            word_freqs[word] += freq
-
-
-    # 3. 计算 BPE 合并 (Compute BPE merges)
-    stats = init_pair_stats(word_freqs)
-    merges_list = []
-    num_merges = vocab_size - len(vocab)
-
-
-    
-    pbar = tqdm(range(num_merges), desc="BPE 合并")
-    for i in pbar:
-        # (a) 统计所有相邻 token 对的频率
-        if not stats:
-            print("没有更多的对可以合并，提前停止。")
-            break
-
-        # (b) 找到频率最高的 token 对，并处理平局
-        # 修正排序规则：频率高优先，频率相同按Unicode字符顺序
-        best_pair = max(stats.items(), key=lambda x: (x[1], x[0]))[0]
+                new_tokens.append(tokens[i])
+                i += 1
+        tokens = new_tokens
         
-         # 生成新的合并字符（如'Ġt'）
-        new_char = best_pair[0] + best_pair[1]
-         # bpe_merges[best_pair] = new_char
+        # 5. 更新pair频率（优化：清空重统计，小数据量足够快）
+        pair_freq.clear()
+        for i in range(len(tokens)-1):
+            # 处理合并后的token（如果是tuple，转为统一的key）
+            left = tokens[i] if isinstance(tokens[i], int) else tuple(tokens[i])
+            right = tokens[i+1] if isinstance(tokens[i+1], int) else tuple(tokens[i+1])
+            pair_freq[(left, right)] += 1
 
-         #（c） 增量更新word_freqs和stats
-        word_freqs = merge_word_freqs_optimized(word_freqs, best_pair, new_char)
-         # ========== 新增：增量更新stats（只更新受影响的pair） ==========
-        
-        for word, freq in word_freqs.items():
-            update_pair_stats(word, best_pair, new_char, stats, freq)
+    # 注意：如果测试需要vocab是ID→token，这里反转
+    # vocab_id_to_token = {v: k for k, v in vocab.items()}
+    return vocab, merges
 
-
-        # (d) 将 "AB" 添加到词汇表中
-        p1_bytes = best_pair[0].encode('utf-8')  # 正确获取字节序列
-        p2_bytes = best_pair[1].encode('utf-8')
-        merges_list.append((p1_bytes, p2_bytes))
-
-
-        # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
-         # 更新vocab（new_char转回bytes）
-        new_char_bytes = bytes([unicode_to_byte[c] for c in new_char])
-        vocab[next_token_id] = new_char_bytes
-        
-        next_token_id += 1
-
-    return vocab, merges_list
    
 
 
