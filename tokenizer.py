@@ -39,18 +39,18 @@ unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 #    return stats
 
 def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tuple[str, str], new_char: str) -> Dict[Tuple[str, ...], int]:
-    new_word_freqs = {}
+    new_word_freqs = defaultdict(int)
     for word, freq in word_freqs.items():
         new_word = []
         i = 0
         while i < len(word):
             if i < len(word)-1 and (word[i], word[i+1]) == pair:
-                new_word.append(new_char)
+                new_word.append(new_id)
                 i += 2
             else:
                 new_word.append(word[i])
                 i += 1
-        new_word_freqs[tuple(new_word)] = new_word_freqs.get(tuple(new_word), 0) + freq
+        new_word_freqs[tuple(new_word)] += freq
     return new_word_freqs
 
 
@@ -60,9 +60,8 @@ def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[str, ...], in
     word_freqs = {}
     for word_str in pat.findall(text_chunk):
         # 将word_str转为字节，再映射为Unicode字符序列
-        word_bytes = word_str.encode("utf-8")
-        word_chars = tuple(byte_to_unicode[b] for b in word_bytes)
-        word_freqs[word_chars] = word_freqs.get(word_chars, 0) + 1
+        word_bytes = tuple(word_str.encode("utf-8"))  # 直接转字节tuple（int形式）
+        word_freqs[word_bytes] = word_freqs.get(word_bytes, 0) + 1
     return word_freqs
 
 
@@ -131,11 +130,11 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
             word_freqs[word] = word_freqs.get(word, 0) + freq
             
     def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
-        stats = {}
+        stats = defaultdict(int)
         for word, freq in word_freqs.items():
             for i in range(len(word)-1):
                 pair = (word[i], word[i+1])
-                stats[pair] = stats.get(pair, 0) + freq
+                stats[pair] += freq
         return stats
             
     stats = init_pair_stats(word_freqs)  # 只执行一次，初始化所有pair的频率
@@ -202,8 +201,8 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
         # (d) 将 "AB" 添加到词汇表中
         
-        p1_bytes = bytes([unicode_to_byte[c] for c in best_pair[0]])
-        p2_bytes = bytes([unicode_to_byte[c] for c in best_pair[1]])
+        p1_bytes = bytes([best_pair[0]])
+        p2_bytes = bytes([best_pair[1]])
         merges_list.append((p1_bytes, p2_bytes))
 
 
