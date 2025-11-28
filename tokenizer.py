@@ -6,6 +6,7 @@ from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 from functools import partial
 from typing import Dict, List, Tuple, Optional, Iterable, Iterator
+from collections import defaultdict 
 
 # --- 核心辅助函数 ---
 
@@ -37,15 +38,22 @@ unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 #            pair = (word[i], word[i+1])
 #            stats[pair] = stats.get(pair, 0) + freq
 #    return stats
+def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
+    stats = defaultdict(int)
+    for word, freq in word_freqs.items():
+        for i in range(len(word)-1):
+            stats[(word[i], word[i+1])] += freq
+    return stats
 
 def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tuple[str, str], new_char: str) -> Dict[Tuple[str, ...], int]:
     new_word_freqs = defaultdict(int)
     for word, freq in word_freqs.items():
         new_word = []
         i = 0
-        while i < len(word):
-            if i < len(word)-1 and (word[i], word[i+1]) == pair:
-                new_word.append(new_id)
+        n = len(word)
+        while i < n:
+            if i < n-1 and word[i] == pair[0] and word[i+1] == pair[1]:
+                new_word.append(new_char)
                 i += 2
             else:
                 new_word.append(word[i])
@@ -57,13 +65,46 @@ def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tup
 def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[str, ...], int]:
     """并行化预分词的工作函数（返回Unicode字符tuple的词频）"""
     pat = regex.compile(pat_str)
-    word_freqs = {}
+    word_freqs = defaultdict(int)  # 改为defaultdict(int)
     for word_str in pat.findall(text_chunk):
-        # 将word_str转为字节，再映射为Unicode字符序列
-        word_bytes = tuple(word_str.encode("utf-8"))  # 直接转字节tuple（int形式）
-        word_freqs[word_bytes] = word_freqs.get(word_bytes, 0) + 1
+        word_bytes = word_str.encode("utf-8")
+        word_chars = tuple(byte_to_unicode[b] for b in word_bytes)
+        word_freqs[word_chars] += 1
     return word_freqs
 
+
+def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char: str, stats: Dict[Tuple[str, str], int], freq: int):
+    i = 0
+    n = len(word)
+    while i < n:
+        if i < n-1 and word[i] == old_pair[0] and word[i+1] == old_pair[1]:
+            # 移除旧pair
+            if stats[old_pair] >= freq:
+                stats[old_pair] -= freq
+                if stats[old_pair] == 0:
+                    del stats[old_pair]
+            # 更新左侧新pair
+            if i > 0:
+                left_pair = (word[i-1], new_char)
+                stats[left_pair] += freq
+                old_left_pair = (word[i-1], word[i])
+                if stats[old_left_pair] >= freq:
+                    stats[old_left_pair] -= freq
+                    if stats[old_left_pair] == 0:
+                        del stats[old_left_pair]
+            # 更新右侧新pair
+            if i < n-2:
+                right_pair = (new_char, word[i+2])
+                stats[right_pair] += freq
+                old_right_pair = (word[i+1], word[i+2])
+                if stats[old_right_pair] >= freq:
+                    stats[old_right_pair] -= freq
+                    if stats[old_right_pair] == 0:
+                        del stats[old_right_pair]
+            i += 2
+        else:
+            i += 1
+            
 
 # --- Problem 3: BPE 训练函数 ---
 
@@ -86,9 +127,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
     # 1. 词汇表初始化 (Vocabulary initialization)
     vocab = {i: bytes([i]) for i in range(256)}
     next_token_id = 256
-    for i, token_str in enumerate(special_tokens):
-        # 将特殊token放在词汇表的末尾，ID从vocab_size-1开始递减
-        # 这样可以确保它们不会与合并的token ID冲突
+    for token_str in special_tokens:
         vocab[next_token_id] = token_str.encode("utf-8")
         next_token_id += 1
 
@@ -102,50 +141,64 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
     # 2. 预分词 (Pre-tokenization)
     # 首先按特殊token分割语料库
-    special_pattern = "|".join(map(re.escape, special_tokens))
-    text_chunks = re.split(f"({special_pattern})", text)
+    work_chunks = []
+    if special_tokens:
+        # 构建特殊token的正则（转义+或连接）
+        special_pattern = "|".join(map(re.escape, special_tokens))
+        # 分割文本：保留特殊token作为独立块
+        text_chunks = re.split(f"({special_pattern})", text)
+        # 过滤空块，区分特殊token和普通文本
+        for chunk in text_chunks:
+            if not chunk:
+                continue
+            if chunk in special_tokens:
+                # 特殊token直接作为独立块
+                work_chunks.append(("special", chunk))
+            else:
+                # 普通文本作为预分词块
+                work_chunks.append(("text", chunk))
+    else:
+        # 无特殊token时直接用全文
+        work_chunks = [("text", text)]
 
-    # 过滤出非特殊token的文本块
-    work_chunks = [chunk for i, chunk in enumerate(text_chunks) if i % 2 == 0 and chunk]
-    
+    # 定义块处理函数
+    def process_chunk(chunk):
+        chunk_type, chunk_content = chunk
+        if chunk_type == "special":
+            # 特殊token转为Unicode字符tuple（不拆分）
+            token_bytes = chunk_content.encode("utf-8")
+            token_chars = tuple(byte_to_unicode[b] for b in token_bytes)
+            return {token_chars: 1}
+        else:
+            # 普通文本预分词
+            return pretokenize_chunk(chunk_content, PAT_STR)
+
     # 修复 2: 修正了 if/else 的缩进问题
     # 如果数据量很小（比如测试用的 corpus.en 只有几KB），强制单进程
-    if len(text) < 5_000_000: # 5MB 以下单进程
-        chunk_freqs_list = [pretokenize_chunk(chunk, PAT_STR) for chunk in work_chunks]
-    else:
-        # 并行化预分词
+    if len(text) >= 5_000_000: # 大文件才用多进程
         num_procs = min(cpu_count(), os.cpu_count() or 1)
         with Pool(num_procs) as pool:
-            worker = partial(pretokenize_chunk, pat_str=PAT_STR)
             chunk_freqs_list = list(tqdm(
-                pool.imap(worker, work_chunks),
+                pool.imap(process_chunk, work_chunks),
                 total=len(work_chunks),
-                desc="并行预分词"
+                desc="并行处理块"
             ))
+    else: # 小文件单进程
+        chunk_freqs_list = [process_chunk(chunk) for chunk in work_chunks]
+
     
     # 合并所有进程的结果
-    word_freqs = {}
-    for chunk_freqs in chunk_freqs_list:
-        for word, freq in chunk_freqs.items():
-            word_freqs[word] = word_freqs.get(word, 0) + freq
-            
-    def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
-        stats = defaultdict(int)
-        for word, freq in word_freqs.items():
-            for i in range(len(word)-1):
-                pair = (word[i], word[i+1])
-                stats[pair] += freq
-        return stats
-            
-    stats = init_pair_stats(word_freqs)  # 只执行一次，初始化所有pair的频率
-    
+    word_freqs = defaultdict(int)
+    for chunk_freq in chunk_freqs_list:
+        for word, freq in chunk_freq.items():
+            word_freqs[word] += freq
 
 
     # 3. 计算 BPE 合并 (Compute BPE merges)
-    num_merges = vocab_size - len(vocab) 
-    merges_list = []  # 使用列表来保证顺序
-    
-    bpe_merges = {}  # 记录合并规则：(char1, char2) -> new_char
+    stats = init_pair_stats(word_freqs)
+    merges_list = []
+    num_merges = vocab_size - len(vocab)
+
 
     
     pbar = tqdm(range(num_merges), desc="BPE 合并")
@@ -161,49 +214,23 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
         
          # 生成新的合并字符（如'Ġt'）
         new_char = best_pair[0] + best_pair[1]
-        bpe_merges[best_pair] = new_char
+         # bpe_merges[best_pair] = new_char
 
          #（c） 增量更新word_freqs和stats
         word_freqs = merge_word_freqs_optimized(word_freqs, best_pair, new_char)
          # ========== 新增：增量更新stats（只更新受影响的pair） ==========
-        def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char: str, 
-                      stats: Dict[Tuple[str, str], int], freq: int):
-            i = 0
-            while i < len(word)-1:
-                if (word[i], word[i+1]) == old_pair:
-                    # 移除旧pair的频率
-                    if old_pair in stats:
-                        stats[old_pair] -= freq
-                        if stats[old_pair] <= 0:
-                            del stats[old_pair]
-                    # 更新左侧相邻对
-                    if i > 0:
-                        left_pair = (word[i-1], new_char)
-                        stats[left_pair] = stats.get(left_pair, 0) + freq
-                        old_left = (word[i-1], word[i])
-                        stats[old_left] -= freq
-                        if stats[old_left] <= 0:
-                            del stats[old_left]
-                    # 更新右侧相邻对
-                    if i+2 < len(word):
-                        right_pair = (new_char, word[i+2])
-                        stats[right_pair] = stats.get(right_pair, 0) + freq
-                        old_right = (word[i+1], word[i+2])
-                        stats[old_right] -= freq
-                        if stats[old_right] <= 0:
-                            del stats[old_right]
-                    i += 2
-                else:
-                    i += 1
+        
         for word, freq in word_freqs.items():
             update_pair_stats(word, best_pair, new_char, stats, freq)
 
 
         # (d) 将 "AB" 添加到词汇表中
-        
-        p1_bytes = bytes([best_pair[0]])
-        p2_bytes = bytes([best_pair[1]])
+        p1_byte = unicode_to_byte[best_pair[0]]
+        p2_byte = unicode_to_byte[best_pair[1]]
+        p1_bytes = bytes([p1_byte])
+        p2_bytes = bytes([p2_byte])
         merges_list.append((p1_bytes, p2_bytes))
+
 
 
         # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
