@@ -69,7 +69,6 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
             - vocab: 从token ID到其字节序列的映射。
             - merges: 按创建顺序列出的BPE合并规则。
     """
-    assert vocab_size >= 256 + len(special_tokens), "词汇表大小不足"
 
     # 1. 词汇表初始化 (Vocabulary initialization)
     vocab = {i: bytes([i]) for i in range(256)}
@@ -144,8 +143,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
         # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
         merges_list.append((p1_bytes, p2_bytes))
-        pbar.set_description(f"合并 {p1_bytes.decode('utf-8', 'replace')}{p2_bytes.decode('utf-8', 'replace')} -> {next_token_id}")
-
+        
         next_token_id += 1
 
     return vocab, merges_list
