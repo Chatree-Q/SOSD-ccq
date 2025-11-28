@@ -54,7 +54,8 @@ def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[int, ...], in
 
 # --- Problem 3: BPE 训练函数 ---
 
-def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> 
+Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
     """
     训练一个字节级的BPE分词器。
 
@@ -90,22 +91,30 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
     special_pattern = "|".join(map(re.escape, special_tokens))
     text_chunks = re.split(f"({special_pattern})", text)
 
+        # --- 修复卡死：智能决定是否使用多进程 ---
+    # 过滤出非特殊token的文本块
+    work_chunks = [chunk for i, chunk in enumerate(text_chunks) if i % 2 == 0 and chunk]
+    
+    # 如果数据量很小（比如测试用的 corpus.en 只有几KB），强制单进程
+    # 避免 Pool 启动的巨大开销和潜在死锁
+    if len(text) < 5_000_000: # 5MB 以下单进程
+        chunk_freqs_list = [pretokenize_chunk(chunk, PAT_STR) for chunk in work_chunks]
+    else:
+
     # 并行化预分词
-    num_procs = min(cpu_count(), os.cpu_count() or 1)
-    with Pool(num_procs) as pool:
+        num_procs = min(cpu_count(), os.cpu_count() or 1)
+        with Pool(num_procs) as pool:
         # 我们只对非特殊token的块进行预分词
-        # 奇数索引的块是特殊token本身，偶数索引是普通文本
-        work_chunks = [chunk for i, chunk in enumerate(text_chunks) if i % 2 == 0 and chunk]
         
         # 使用 partial 来传递固定的 pat_str 参数（或者像下面这样用lambda/wrapper）
         # from functools import partial
-        worker = partial(pretokenize_chunk, pat_str=PAT_STR)
+            worker = partial(pretokenize_chunk, pat_str=PAT_STR)
         
-        chunk_freqs_list = list(tqdm(
-            pool.imap(worker, work_chunks),
-            total=len(work_chunks),
-            desc="并行预分词"
-        ))
+            chunk_freqs_list = list(tqdm(
+                pool.imap(worker, work_chunks),
+                total=len(work_chunks),
+                desc="并行预分词"
+            ))
     
     # 合并所有进程的结果
     word_freqs = {}
