@@ -134,7 +134,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
             # 返回一个元组 (频率, 字节对)，Python会按顺序比较
             return (freq, pair)
             
-        best_pair = max(stats.items(), key=tie_break_key)[0]
+        best_pair = min(stats.items(), key=lambda item: (-item[1], item[0]))[0]
 
         # (c) 用一个新的 token "AB" 替换所有 ("A", "B") 对
         word_freqs = merge_word_freqs(word_freqs, best_pair, next_token_id)
