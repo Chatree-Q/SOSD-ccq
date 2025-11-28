@@ -390,11 +390,11 @@ if __name__ == '__main__':
         with open(INPUT_PATH, "w", encoding="utf-8") as f:
             data = f.read()  # 读取文件内容
         vocab, merges = train_bpe(data, VOCAB_SIZE, SPECIAL_TOKENS)  # 传入内容而非路径
-            f.write("low low low low low\n")
-            f.write("lower lower widest widest widest\n")
-            f.write("newest newest newest newest newest newest\n")
-            f.write("This is a simple test. Emoji: 😊. Chinese: 这里有一些中文测试数据。\n")
-            f.write("The quick brown fox jumps over the lazy dog. " * 50)
+        f.write("low low low low low\n")
+        f.write("lower lower widest widest widest\n")
+        f.write("newest newest newest newest newest newest\n")
+        f.write("This is a simple test. Emoji: 😊. Chinese: 这里有一些中文测试数据。\n")
+        f.write("The quick brown fox jumps over the lazy dog. " * 50)
 
     # 训练参数
     VOCAB_SIZE = 500
