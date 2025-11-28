@@ -37,8 +37,8 @@ def test_bytes_to_unicode_consistency():
 
 
 # 全局映射表
-# byte_to_unicode = bytes_to_unicode()
-# unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
+byte_to_unicode = bytes_to_unicode()
+unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 
 #def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
 #    """
@@ -238,12 +238,9 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tu
 
 
         # (d) 将 "AB" 添加到词汇表中
-        p1_byte = unicode_to_byte[best_pair[0]]
-        p2_byte = unicode_to_byte[best_pair[1]]
-        p1_bytes = bytes([p1_byte])
-        p2_bytes = bytes([p2_byte])
+        p1_bytes = best_pair[0].encode('utf-8')  # 正确获取字节序列
+        p2_bytes = best_pair[1].encode('utf-8')
         merges_list.append((p1_bytes, p2_bytes))
-
 
 
         # (e) 将 ("A", "B") 记录到合并规则列表 merges 中
