@@ -390,7 +390,7 @@ if __name__ == '__main__':
     print("\n--- Tokenizer 实验 ---")
     
     # 从文件加载分词器
-    tokenizer = BPE_Tokenizer.from_files(VOCAB_FILE, MERGES_FILE, SPECIAL_TOKENS)
+    tokenizer = BPE_Tokenizer(vocab, merges, SPECIAL_TOKENS)
     
     # 测试编码和解码
     text_to_test = "newest low lower 😊你好<|endoftext|>"
