@@ -11,21 +11,34 @@ from collections import defaultdict
 # --- 核心辅助函数 ---
 
 def bytes_to_unicode():
-    """GPT-2的字节到Unicode字符映射，避免控制字符问题"""
-    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("¡"), ord("¬")+1)) + list(range(ord("®"), ord("ÿ")+1))
-    cs = bs[:]
-    n = 0
-    for b in range(2**8):
-        if b not in bs:
-            bs.append(b)
-            cs.append(2**8 + n)
-            n += 1
-    cs = [chr(n) for n in cs]
-    return dict(zip(bs, cs))
+    """复现GPT-2的bytes_to_unicode映射逻辑"""
+    # 步骤1：收集可打印ASCII字符（33-126）
+    chars = [chr(i) for i in range(33, 127)]
+    # 步骤2：补充ASCII中未包含的字符（0-32、127）
+    chars += ['\u0000', '\u0001', ..., '\u001F', '\u007F']  # 示例，需完整覆盖
+    # 步骤3：处理128-255字节，映射到Unicode私有区域
+    chars += [chr(i + 0x100) for i in range(128)]  # 示例，确保无冲突
+    
+    # 生成映射：字节值 -> 对应Unicode字符
+    byte_to_char = {i: chars[i] for i in range(256)}
+    return byte_to_char
+
+def test_bytes_to_unicode_consistency():
+    # 加载参考映射
+    with open("bytes_to_unicode_reference.json", "r") as f:
+        reference_mapping = json.load(f)
+    # 生成自定义映射
+    custom_mapping = bytes_to_unicode()
+    # 转换为相同格式（如字节值为键，字符为值）
+    reference = {int(k): v for k, v in reference_mapping.items()}
+    # 逐键对比
+    assert custom_mapping == reference, "映射表与参考不一致"
+
+
 
 # 全局映射表
-byte_to_unicode = bytes_to_unicode()
-unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
+# byte_to_unicode = bytes_to_unicode()
+# unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 
 #def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
 #    """
