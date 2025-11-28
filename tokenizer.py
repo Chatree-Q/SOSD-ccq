@@ -27,16 +27,16 @@ byte_to_unicode = bytes_to_unicode()
 unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 
 #def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
-    """
-    从词频字典中高效地计算所有相邻字节对的频率。
-    这是优化的关键：我们不遍历整个文本，而是遍历词汇表并乘以其频率。
-    """
-    #stats = {}
-    #for word, freq in word_freqs.items():
-    #    for i in range(len(word) - 1):
-     #       pair = (word[i], word[i+1])
-      #      stats[pair] = stats.get(pair, 0) + freq
-    #return stats
+#    """
+#    从词频字典中高效地计算所有相邻字节对的频率。
+#    这是优化的关键：我们不遍历整个文本，而是遍历词汇表并乘以其频率。
+#    """
+#    stats = {}
+#    for word, freq in word_freqs.items():
+#        for i in range(len(word) - 1):
+#            pair = (word[i], word[i+1])
+#            stats[pair] = stats.get(pair, 0) + freq
+#    return stats
 
 def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tuple[str, str], new_char: str) -> Dict[Tuple[str, ...], int]:
     new_word_freqs = {}
