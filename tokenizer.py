@@ -165,8 +165,9 @@ def train_bpe(data, vocab_size, special_tokens):
         merges.append((p1_bytes, p2_bytes))  # 直接存bytes对，无需后续转换
         
         # 3. 新增合并后的token到vocab
-        merged_token = p1_bytes + p2_bytes  # 合并后的bytes，如b'e '
-        vocab[merged_token] = next_token_id
+        merged_token = p1_bytes + p2_bytes
+        new_id = next_token_id  # 新ID
+        vocab[merged_token] = new_id
         next_token_id += 1
         
         # 4. 合并token序列（整数列表）
@@ -176,7 +177,7 @@ def train_bpe(data, vocab_size, special_tokens):
             if i < len(tokens)-1 and (tokens[i], tokens[i+1]) == best_pair:
                 # 用合并后的token的ID？不，这里继续用整数表示（或用新ID，看逻辑）
                 # 注意：如果后续统计需要，这里可以用新ID，但更简单的是暂时用tuple标记，最后统一转bytes
-                new_tokens.append(best_pair)  # 或用next_token_id-1（刚分配的ID）
+                new_tokens.append(new_id)  # 或用next_token_id-1（刚分配的ID）
                 i += 2
             else:
                 new_tokens.append(tokens[i])
@@ -387,6 +388,8 @@ if __name__ == '__main__':
     if not os.path.exists(INPUT_PATH):
         print(f"正在生成测试数据到 {INPUT_PATH} ...")
         with open(INPUT_PATH, "w", encoding="utf-8") as f:
+            data = f.read()  # 读取文件内容
+        vocab, merges = train_bpe(data, VOCAB_SIZE, SPECIAL_TOKENS)  # 传入内容而非路径
             f.write("low low low low low\n")
             f.write("lower lower widest widest widest\n")
             f.write("newest newest newest newest newest newest\n")
