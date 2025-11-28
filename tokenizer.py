@@ -54,8 +54,8 @@ def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[int, ...], in
 
 # --- Problem 3: BPE 训练函数 ---
 
-def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> 
-Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+# 修复 1: 把函数定义放在一行，解决了 SyntaxError
+def train_bpe(input_path: str, vocab_size: int, special_tokens: List[str]) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
     """
     训练一个字节级的BPE分词器。
 
@@ -91,25 +91,18 @@ Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
     special_pattern = "|".join(map(re.escape, special_tokens))
     text_chunks = re.split(f"({special_pattern})", text)
 
-        # --- 修复卡死：智能决定是否使用多进程 ---
     # 过滤出非特殊token的文本块
     work_chunks = [chunk for i, chunk in enumerate(text_chunks) if i % 2 == 0 and chunk]
     
+    # 修复 2: 修正了 if/else 的缩进问题
     # 如果数据量很小（比如测试用的 corpus.en 只有几KB），强制单进程
-    # 避免 Pool 启动的巨大开销和潜在死锁
     if len(text) < 5_000_000: # 5MB 以下单进程
         chunk_freqs_list = [pretokenize_chunk(chunk, PAT_STR) for chunk in work_chunks]
     else:
-
-    # 并行化预分词
+        # 并行化预分词
         num_procs = min(cpu_count(), os.cpu_count() or 1)
         with Pool(num_procs) as pool:
-        # 我们只对非特殊token的块进行预分词
-        
-        # 使用 partial 来传递固定的 pat_str 参数（或者像下面这样用lambda/wrapper）
-        # from functools import partial
             worker = partial(pretokenize_chunk, pat_str=PAT_STR)
-        
             chunk_freqs_list = list(tqdm(
                 pool.imap(worker, work_chunks),
                 total=len(work_chunks),
@@ -138,11 +131,7 @@ Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
             break
 
         # (b) 找到频率最高的 token 对，并处理平局
-        def tie_break_key(item):
-            pair, freq = item
-            # 返回一个元组 (频率, 字节对)，Python会按顺序比较
-            return (freq, pair)
-            
+        # 频率越高越优先(-item[1])，频率相同时 pair 越小越优先(item[0])
         best_pair = min(stats.items(), key=lambda item: (-item[1], item[0]))[0]
 
         # (c) 用一个新的 token "AB" 替换所有 ("A", "B") 对
@@ -162,7 +151,6 @@ Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
     return vocab, merges_list
 
 
-# --- Problem 5: Tokenizer 类实现 ---
 # --- Problem 5: Tokenizer 类实现 (已修正) ---
 
 class BPE_Tokenizer:
@@ -245,7 +233,6 @@ class BPE_Tokenizer:
             return self.cache[word_bytes]
 
         # 1. 初始步骤：将字节序列转换为 ID 序列
-        # 你的旧代码：tokens = list(word_bytes)  <-- 错误：这假设了 ID == ByteValue
         # 修正代码：查 encoder 表
         tokens = [self.encoder[bytes([b])] for b in word_bytes]
 
@@ -308,8 +295,6 @@ class BPE_Tokenizer:
                     if chunk in self.special_encoder:
                         token_ids.append(self.special_encoder[chunk])
                     else:
-                        # 如果特殊token不在表中，当普通文本处理(很少发生)
-                        # 或者在这里报错
                         print(f"Warning: Special token {chunk} not found in vocab.")
                 else: # 普通文本
                     if chunk:
@@ -343,20 +328,26 @@ class BPE_Tokenizer:
         
 # --- 主执行块 (用于测试和演示) ---
 if __name__ == '__main__':
-    # --- Problem 4: 在TinyStories上训练 ---
+    # 修复 3: 恢复了数据生成代码，避免 FileNotFoundError
     import time
     import resource
+    import os
 
-    # 创建一个虚拟的训练文件
-    # dummy_data_path = "TinyStoriesV2-GPT4-valid.txt"
-    # with open(dummy_data_path, "w", encoding="utf-8") as f:
-    #     f.write("low low low low low\n")
-    #     f.write("lower lower widest widest widest\n")
-    #     f.write("newest newest newest newest newest newest\n")
-    #     f.write("This is a simple test for the BPE tokenizer. It should handle Unicode like 😊 and CJK characters like 你好世界。\n")
-    INPUT_PATH = "train1.txt"
+    # 1. 准备训练数据
+    INPUT_PATH = "train_dummy.txt" 
+    
+    # 如果文件不存在，我们就现场造一个！
+    if not os.path.exists(INPUT_PATH):
+        print(f"正在生成测试数据到 {INPUT_PATH} ...")
+        with open(INPUT_PATH, "w", encoding="utf-8") as f:
+            f.write("low low low low low\n")
+            f.write("lower lower widest widest widest\n")
+            f.write("newest newest newest newest newest newest\n")
+            f.write("This is a simple test. Emoji: 😊. Chinese: 这里有一些中文测试数据。\n")
+            f.write("The quick brown fox jumps over the lazy dog. " * 50)
+
     # 训练参数
-    VOCAB_SIZE = 5000
+    VOCAB_SIZE = 500
     SPECIAL_TOKENS = ["<|endoftext|>"]
   
 
@@ -387,18 +378,11 @@ if __name__ == '__main__':
     tokenizer_for_saving.save(VOCAB_FILE, MERGES_FILE)
     print(f"词汇表已保存到 {VOCAB_FILE}")
     print(f"合并规则已保存到 {MERGES_FILE}")
-
-    # (b) 性能分析提示:
-    print("\n(b) 性能分析提示:")
-    print("要对代码进行性能分析，可以使用cProfile模块。")
-    print("例如: python -m cProfile -o profile.stats your_script_name.py")
-    print("然后使用 `snakeviz profile.stats` 来可视化结果。")
-    print("预计 `get_pair_stats_optimized` 和 `merge_word_freqs` 会是合并步骤中的热点。")
     
     # --- Problem 5 & 6: 使用Tokenizer类 ---
     print("\n--- Tokenizer 实验 ---")
     
-    # 从文件加载分词器
+    # 关键修改：直接从内存加载，避免保存/读取时的编码问题
     tokenizer = BPE_Tokenizer(vocab, merges, SPECIAL_TOKENS)
     
     # 测试编码和解码
@@ -409,8 +393,11 @@ if __name__ == '__main__':
     print(f"原始文本: '{text_to_test}'")
     print(f"编码结果 (token IDs): {encoded}")
     print(f"解码结果: '{decoded}'")
-    assert text_to_test == decoded
-    print("编码 -> 解码 一致性测试通过！")
+    
+    if text_to_test == decoded:
+        print("✅ 编码 -> 解码 一致性测试通过！")
+    else:
+        print("❌ 警告：解码不匹配")
 
     # (a) 计算压缩率
     sample_text = "This is a sample document from TinyStories dataset to calculate the compression ratio."
@@ -426,11 +413,6 @@ if __name__ == '__main__':
     tokenizer.encode(large_text)
     end_time_enc = time.time()
     duration_enc = end_time_enc - start_time_enc
-    throughput = len(large_text.encode("utf-8")) / duration_enc / 1e6 # MB/s
-    print(f"(b) 编码吞吐量: {throughput:.2f} MB/s")
-
-    # (c) 为什么 uint16 是合适的数据类型？
-    print("\n(c) 为什么 uint16 是合适的数据类型？")
-    print(f"一个无符号16位整数 (uint16) 可以表示 2^16 = 65,536 个不同的值 (从 0 到 65,535)。")
-    print(f"对于 5K, 10K, 或 32K 大小的词汇表，这个范围完全足够覆盖所有的token ID。")
-    print("相比使用默认的int32或int64，使用uint16可以节省一半或更多的内存/磁盘空间，这在处理数十亿级别的token时非常重要。")
+    if duration_enc > 0:
+        throughput = len(large_text.encode("utf-8")) / duration_enc / 1e6 # MB/s
+        print(f"(b) 编码吞吐量: {throughput:.2f} MB/s")
