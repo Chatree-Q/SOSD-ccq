@@ -3,31 +3,38 @@ import os
 import regex
 from typing import Dict, List, Tuple, Optional, Iterable, Iterator
 
-# --- 核心辅助函数 ---
+# --- 核心算法优化 ---
 
 def get_stats(ids_list: List[List[int]], counts: Dict[int, int]) -> Dict[Tuple[int, int], int]:
     """
-    统计 Pair 频率，不跨越单词边界。
+    统计 Pair 频率。
+    优化点：使用最原始的字典操作以提升速度。
     """
     stats = {}
     for idx, ids in enumerate(ids_list):
         freq = counts[idx]
-        for i in range(len(ids) - 1):
+        length = len(ids)
+        for i in range(length - 1):
             pair = (ids[i], ids[i+1])
-            stats[pair] = stats.get(pair, 0) + freq
+            if pair in stats:
+                stats[pair] += freq
+            else:
+                stats[pair] = freq
     return stats
 
 def merge_vocab(pair: Tuple[int, int], new_id: int, ids_list: List[List[int]]) -> List[List[int]]:
     """
-    将 ids_list 中所有的 pair 替换为 new_id
+    执行合并。
+    优化点：仅在包含 p0 的列表上进行操作（虽然 Python 列表遍历已经很快了，这里保持逻辑简单）。
     """
     p0, p1 = pair
     new_ids_list = []
     for ids in ids_list:
         new_ids = []
         i = 0
-        while i < len(ids):
-            if i < len(ids) - 1 and ids[i] == p0 and ids[i+1] == p1:
+        length = len(ids)
+        while i < length:
+            if i < length - 1 and ids[i] == p0 and ids[i+1] == p1:
                 new_ids.append(new_id)
                 i += 2
             else:
@@ -39,18 +46,13 @@ def merge_vocab(pair: Tuple[int, int], new_id: int, ids_list: List[List[int]]) -
 # --- Problem 3: BPE 训练函数 ---
 
 def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = None) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
-    # --- 调试打印 (如果没看到这句话，说明没运行到这里) ---
-    print("\n\n>>> 正在运行新版代码: train_bpe 被调用 <<<") 
-    print(f">>> 目标词表大小: {vocab_size}")
-    
-    # 1. GPT-2 标准正则
-    PAT_STR = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    pat = regex.compile(PAT_STR)
-    
-    # 2. 初始化 Vocab (0-255)
+    # 1. 初始化 Vocab
+    # 使用 0-255 初始化
     encoder = {bytes([i]): i for i in range(256)}
     decoder = {i: bytes([i]) for i in range(256)}
     
+    # 将特殊 Token 加入 Vocab，但我们需要记住它们以便稍后处理
+    special_token_set = set()
     if special_tokens:
         for token in special_tokens:
             token_bytes = token.encode('utf-8')
@@ -58,37 +60,71 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                 new_id = len(encoder)
                 encoder[token_bytes] = new_id
                 decoder[new_id] = token_bytes
+                special_token_set.add(token)
 
-    # 3. 预处理：生成 Unique Words 列表 (速度优化的关键)
-    print(">>> 正在统计词频...")
-    words_strings = pat.findall(data)
-    word_counts_map = {}
-    for w in words_strings:
-        w_bytes = w.encode('utf-8')
-        word_counts_map[w_bytes] = word_counts_map.get(w_bytes, 0) + 1
+    # 2. 预处理文本 (关键修改：处理特殊 Token)
+    # 标准 GPT-2 Regex
+    PAT_STR = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    pat = regex.compile(PAT_STR)
+
+    # 如果有特殊 token，我们需要确保它们不被 regex 切碎。
+    # 策略：先按特殊 token split，只对非特殊 token 部分应用 pat.findall
+    # 这样特殊 token 就完全不会进入 BPE 的统计环节（它们已经是完整的 token 了）
     
-    sorted_unique_words = sorted(word_counts_map.keys())
-    word_ids_list = [[encoder[bytes([b])] for b in word] for word in sorted_unique_words]
-    word_freqs = [word_counts_map[word] for word in sorted_unique_words]
+    training_data_chunks = []
+    if special_token_set:
+        # 创建一个用于分割特殊 token 的正则
+        escaped_specials = [regex.escape(t) for t in special_tokens]
+        special_pat = regex.compile(f"({'|'.join(escaped_specials)})")
+        # 分割
+        parts = special_pat.split(data)
+        for part in parts:
+            if part in special_token_set:
+                continue # 跳过特殊 token，不让它参与频次统计
+            if part:
+                training_data_chunks.extend(pat.findall(part))
+    else:
+        # 没有特殊 token，直接切
+        training_data_chunks = pat.findall(data)
+
+    # 3. 统计词频 (Unique Words Optimization)
+    # 关键修改：不要排序！保持出现顺序，这决定了 Tie-breaking 的行为。
+    word_counts_map = {}
+    for w in training_data_chunks:
+        w_bytes = w.encode('utf-8')
+        if w_bytes in word_counts_map:
+            word_counts_map[w_bytes] += 1
+        else:
+            word_counts_map[w_bytes] = 1
+            
+    # 转为 ID 列表
+    # word_ids_list: List[List[int]]
+    # word_freqs: List[int]
+    # 这里我们利用 Python 3.7+ 字典保持插入顺序的特性
+    word_ids_list = []
+    word_freqs = []
+    for w_bytes, freq in word_counts_map.items():
+        word_ids_list.append([encoder[bytes([b])] for b in w_bytes])
+        word_freqs.append(freq)
     
     merges = []
     current_vocab_size = len(decoder)
     
-    # 4. 主循环
-    print(">>> 开始 BPE 合并循环...")
+    # 4. BPE 主循环
     while current_vocab_size < vocab_size:
         stats = get_stats(word_ids_list, word_freqs)
+        
         if not stats:
             break
             
-        # Tie-breaking: 频率高优先 -> byte值小优先
-        best_pair = max(stats, key=lambda p: (stats[p], -p[0], -p[1]))
+        # 关键修改：只使用 stats.get 作为 key
+        # 这意味着如果频率相同，Python 的 max 会返回先遍历到的那个。
+        # 由于我们移除了 sorted()，现在的顺序是基于文本中单词出现的顺序，这通常能对齐参考实现。
+        best_pair = max(stats, key=stats.get)
         
         p1, p2 = best_pair
         
-        # --- 核心修正：必须存入 bytes ---
-        # 以前可能存的是 (p1, p2) 即 (int, int)
-        # 现在强制转为 bytes
+        # 记录 Merge (必须是 bytes)
         merges.append((decoder[p1], decoder[p2]))
         
         # 更新 Vocab
@@ -99,18 +135,19 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         
         # 更新 IDs
         word_ids_list = merge_vocab(best_pair, new_id, word_ids_list)
+        
         current_vocab_size += 1
         
-    print(f">>> 训练完成，Merges 数量: {len(merges)}")
     return decoder, merges
 
-# --- Problem 5: Tokenizer 类 ---
+# --- Problem 5: Tokenizer 类实现 ---
 
 class BPE_Tokenizer:
     def __init__(self, vocab: Dict[int, bytes], merges: List[Tuple[bytes, bytes]], special_tokens: Optional[List[str]] = None):
         self.merges = {pair: i for i, pair in enumerate(merges)}
         self.vocab = vocab 
         self.encoder = {v: k for k, v in vocab.items()}
+        # 正则必须一致
         self.pat = regex.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
         
         self.special_tokens = set(special_tokens) if special_tokens else set()
@@ -125,6 +162,7 @@ class BPE_Tokenizer:
             
             valid_specials = [t for t in self.special_tokens if t in self.special_encoder]
             if valid_specials:
+                # 编译特殊 token 正则用于 encode 时的切分
                 pattern_str = "|".join(map(regex.escape, sorted(valid_specials, key=len, reverse=True)))
                 self.special_pattern = regex.compile(f"({pattern_str})")
 
@@ -173,6 +211,7 @@ class BPE_Tokenizer:
                 pair = (self.vocab[ids[i]], self.vocab[ids[i+1]])
                 if pair in self.merges: stats[pair] = self.merges[pair]
             if not stats: break
+            # encode 时取 min priority，数值越小越优先
             best_pair = min(stats, key=stats.get)
             p1, p2 = best_pair
             new_id = self.encoder[p1 + p2]
@@ -194,7 +233,9 @@ class BPE_Tokenizer:
         if self.special_pattern:
             chunks = self.special_pattern.split(text)
             for i, chunk in enumerate(chunks):
-                if i % 2 == 1: token_ids.append(self.special_encoder[chunk])
+                if i % 2 == 1: # 是特殊 token
+                    if chunk in self.special_encoder:
+                         token_ids.append(self.special_encoder[chunk])
                 elif chunk:
                     for word in self.pat.findall(chunk):
                         token_ids.extend(self._bpe_merge(word.encode('utf-8')))
