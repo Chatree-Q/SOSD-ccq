@@ -9,8 +9,9 @@ from collections import defaultdict
 def get_stats(ids_list: List[List[int]], counts: List[int]) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], Dict[int, int]]]:
     """
     初始全量统计。
+    ids_list 必须已经按字典序排好。
     返回:
-    1. stats: {(p0, p1): total_freq} 
+    1. stats: {(p0, p1): total_freq} (利用 Python 3.7+ 字典保持插入序)
     2. pair_index: {(p0, p1): {word_idx: count_in_word}}
     """
     stats = defaultdict(int)
@@ -45,7 +46,6 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
 
     training_data_chunks = []
     if special_token_set:
-        # 使用正则分割特殊 token，确保它们不参与 BPE 统计
         escaped_specials = [regex.escape(t) for t in special_tokens]
         special_pat = regex.compile(f"({'|'.join(escaped_specials)})")
         parts = special_pat.split(data)
@@ -62,7 +62,8 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     for w in training_data_chunks:
         word_counts_map[w.encode('utf-8')] += 1
             
-    # 按字典序排序，保证基础顺序的确定性
+    # --- 关键点 1: 必须按字典序排序 ---
+    # 这样 word_idx=0 的单词就是字典序最小的单词。
     sorted_words = sorted(word_counts_map.keys())
     
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in sorted_words]
@@ -79,11 +80,10 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         if not stats:
             break
             
-        # --- 关键修改：显式 Tie-breaking ---
-        # 1. -stats[p]: 负的频率越小 -> 频率越大优先
-        # 2. p: 频率相同时，Tuple (p0, p1) 越小优先 (字典序/ID数值序)
-        # 这消除了对 insertion order 的依赖，完全对齐标准 BPE 实现
-        best_pair = min(stats, key=lambda p: (-stats[p], p))
+        # --- 关键点 2: 恢复使用 max(stats, key=stats.get) ---
+        # 依赖 Python 字典的插入顺序 tie-breaking。
+        # 初始 stats 是按 sorted_words 顺序插入的，所以平局时选字典序靠前单词里的 pair。
+        best_pair = max(stats, key=stats.get)
         
         # 记录 Merge
         p0, p1 = best_pair
@@ -95,10 +95,16 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         decoder[new_id] = new_token_bytes
         encoder[new_token_bytes] = new_id
         
-        # 增量更新受影响的单词
+        # --- 关键点 3: 按 word_idx 排序遍历受影响的单词 ---
+        # pair_index[best_pair] 是 {word_idx: count}
+        # 如果直接遍历，顺序是随机的(或取决于之前的插入顺序)。
+        # 强制 sorted() 确保我们总是先处理字典序靠前的单词。
+        # 这样，新产生的 Pair 也会按“单词出现顺序”被插入到 stats 中，
+        # 从而保证下一轮 max() 的 tie-breaking 行为与全量扫描一致。
         indices_to_update = pair_index[best_pair]
+        sorted_indices = sorted(indices_to_update.keys()) 
         
-        for word_idx, _ in indices_to_update.items():
+        for word_idx in sorted_indices:
             ids = word_ids_list[word_idx]
             freq = word_freqs[word_idx]
             
@@ -129,6 +135,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                     new_ids.append(new_id)
                     
                     # 增加新 Pair 统计
+                    # 因为我们是按 word_idx 从小到大遍历的，所以新 Pair 插入 stats 的顺序是确定的
                     if i > 0:
                         new_prev_pair = (ids[i-1], new_id)
                         stats[new_prev_pair] += freq
@@ -153,7 +160,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         
     return decoder, merges
 
-# --- Problem 5: Tokenizer 类实现 ---
+# --- Problem 5: Tokenizer 类实现 (保持不变) ---
 
 class BPE_Tokenizer:
     def __init__(self, vocab: Dict[int, bytes], merges: List[Tuple[bytes, bytes]], special_tokens: Optional[List[str]] = None):
@@ -222,8 +229,6 @@ class BPE_Tokenizer:
                 pair = (self.vocab[ids[i]], self.vocab[ids[i+1]])
                 if pair in self.merges: stats[pair] = self.merges[pair]
             if not stats: break
-            # 编码时的 tie-breaking: 优先级(数值越小越优先), 其次是位置(自然顺序)
-            # min(stats, key=stats.get) 即可，因为 self.merges 里的 value 就是 rank
             best_pair = min(stats, key=stats.get)
             p1, p2 = best_pair
             new_id = self.encoder[p1 + p2]
