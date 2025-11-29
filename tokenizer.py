@@ -6,13 +6,6 @@ from collections import defaultdict
 
 # --- 核心算法：安全高效的增量 BPE ---
 
-def get_pair_counts(ids: List[int]) -> Dict[Tuple[int, int], int]:
-    """计算单个单词内所有 Pair 的频率"""
-    counts = defaultdict(int)
-    for i in range(len(ids) - 1):
-        counts[(ids[i], ids[i+1])] += 1
-    return counts
-
 def get_stats(ids_list: List[List[int]], counts: List[int]) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], Dict[int, int]]]:
     """初始全量统计"""
     stats = defaultdict(int)
@@ -41,6 +34,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                 special_token_set.add(token)
 
     # 2. 预处理文本
+    # GPT-2 pre-tokenization regex
     PAT_STR = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     pat = regex.compile(PAT_STR)
 
@@ -60,8 +54,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     for w in training_data_chunks:
         word_counts_map[w.encode('utf-8')] += 1
             
-    # 排序：虽然下面的 max 逻辑是主要的 tie-breaker，但基础顺序能保证稳定性
-    # 使用 (-freq, x) 排序：优先处理高频词
+    # 排序：保证处理顺序的确定性
     sorted_words = sorted(word_counts_map.keys(), key=lambda x: (-word_counts_map[x], x))
     
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in sorted_words]
@@ -81,10 +74,10 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
 
         if not stats: break
             
-        # --- 关键策略: Tie-breaking ---
-        # 参考实现倾向于 max((freq, pair))，即频率高优先，频率相同字节序大优先
-        # 这通过了 index 92 的 (t, h) > (c, om) 测试
-        best_pair = max(stats, key=lambda p: (stats[p], p))
+        # --- 关键策略修复 ---
+        # 标准 BPE 实现 (如 GPT-2/MinBPE) 在频率相同时，优先合并字典序靠前的 Pair。
+        # 使用 min 配合 -freq 实现：找频率最高(-freq最小)，且 pair 本身最小(字典序最前)的组合。
+        best_pair = min(stats, key=lambda p: (-stats[p], p))
         
         p0, p1 = best_pair
         merges.append((decoder[p0], decoder[p1]))
@@ -96,15 +89,14 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         
         # --- 鲁棒的增量更新 ---
         indices_to_update = pair_index[best_pair]
-        # Copy keys to avoid runtime error if dict changes size
+        # Copy keys implies we handle the current snapshot of words containing the pair
         indices_list = list(indices_to_update.keys())
         
         for word_idx in indices_list:
             ids = word_ids_list[word_idx]
             freq = word_freqs[word_idx]
             
-            # 1. 撤销旧统计：直接减去该单词目前贡献的所有 Pair
-            # 这样做虽然比精细操作慢一点点，但绝对正确，不会有边界 bug
+            # 1. 撤销旧统计
             if len(ids) >= 2:
                 for i in range(len(ids) - 1):
                     pair = (ids[i], ids[i+1])
@@ -124,14 +116,14 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                     i += 1
             word_ids_list[word_idx] = new_ids
             
-            # 3. 应用新统计：加上新序列的所有 Pair
+            # 3. 应用新统计
             if len(new_ids) >= 2:
                 for i in range(len(new_ids) - 1):
                     pair = (new_ids[i], new_ids[i+1])
                     stats[pair] += freq
                     pair_index[pair][word_idx] += 1
         
-        # 确保 best_pair 被清除 (虽然上面的循环应该已经把它减为0了)
+        # 确保 best_pair 对应的 entry 从 stats 中移除（虽然计数应为0，但为了安全显式清理）
         if best_pair in stats: del stats[best_pair]
         
         current_vocab_size += 1
@@ -153,6 +145,7 @@ class BPE_Tokenizer:
                  if t_bytes in self.encoder: self.special_encoder[t] = self.encoder[t_bytes]
             valid_specials = [t for t in self.special_tokens if t in self.special_encoder]
             if valid_specials:
+                # Sort by length desc to match longest special token first
                 pattern_str = "|".join(map(regex.escape, sorted(valid_specials, key=len, reverse=True)))
                 self.special_pattern = regex.compile(f"({pattern_str})")
         self.cache = {}
@@ -207,6 +200,8 @@ class BPE_Tokenizer:
         if self.special_pattern:
             chunks = self.special_pattern.split(text)
             for i, chunk in enumerate(chunks):
+                # split behavior: [text, special, text, special...]
+                # if capture group used, separators are returned.
                 if i % 2 == 1:
                     if chunk in self.special_encoder: token_ids.append(self.special_encoder[chunk])
                 elif chunk:
