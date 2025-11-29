@@ -4,13 +4,11 @@ import regex
 from typing import Dict, List, Tuple, Optional, Iterable, Iterator
 from collections import defaultdict
 
-# --- 核心算法：增量更新 BPE (带 First Seen 追踪) ---
+# --- 核心算法：增量更新 BPE (带安全气囊的 First Seen) ---
 
 def get_stats(ids_list: List[List[int]], counts: List[int]) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], Dict[int, int]], Dict[Tuple[int, int], int]]:
     """
-    stats: {(p0, p1): freq}
-    pair_index: {(p0, p1): {word_idx: count}}
-    first_seen: {(p0, p1): min_word_idx} - 记录 Pair 第一次出现的单词索引
+    初始全量统计。
     """
     stats = defaultdict(int)
     pair_index = defaultdict(lambda: defaultdict(int))
@@ -55,8 +53,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     else:
         training_data_chunks = pat.findall(data)
 
-    # 3. 统计词频
-    # 使用普通 dict 保持 First Appearance Order
+    # 3. 统计词频 (保持出现顺序)
     word_counts_map = {}
     for w in training_data_chunks:
         w_bytes = w.encode('utf-8')
@@ -65,7 +62,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         else:
             word_counts_map[w_bytes] = 1
             
-    # 关键：不排序，保持出现顺序。这样 word_idx=0 代表文本中第一个遇到的 unique word
+    # 不排序，保持出现顺序，这样 first_seen 才有意义
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in word_counts_map.keys()]
     word_freqs = list(word_counts_map.values())
     
@@ -77,10 +74,20 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     
     # 5. 主循环
     while current_vocab_size < vocab_size:
+        # --- 安全清理：移除无效的 key ---
+        # 防止 stats 里有 0 值的残留导致计算错误
+        # 虽然下面的逻辑应该处理了，但这是为了防止 crash 的双重保险
+        garbage = [k for k, v in stats.items() if v <= 0]
+        for k in garbage:
+            del stats[k]
+            if k in first_seen: del first_seen[k]
+
         if not stats: break
             
-        # Tie-breaking: 1.频率高 2.最早出现
-        best_pair = min(stats, key=lambda p: (-stats[p], first_seen[p]))
+        # --- 核心修复：安全 Tie-breaking ---
+        # 1. 频率高 (-stats[p])
+        # 2. 最早出现 (first_seen.get(p, inf)) -> 如果找不到 key，就当它是无穷大，排在最后，绝不报错
+        best_pair = min(stats, key=lambda p: (-stats[p], first_seen.get(p, float('inf'))))
         
         p0, p1 = best_pair
         merges.append((decoder[p0], decoder[p1]))
@@ -91,7 +98,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         encoder[new_token_bytes] = new_id
         
         indices_to_update = pair_index[best_pair]
-        # 按出现顺序更新，确保 first_seen 逻辑正确
+        # 必须排序，确保 first_seen 逻辑正确
         sorted_indices = sorted(indices_to_update.keys())
         
         for word_idx in sorted_indices:
@@ -107,13 +114,18 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                         stats[prev] -= freq
                         pair_index[prev][word_idx] -= 1
                         if pair_index[prev][word_idx] == 0: del pair_index[prev][word_idx]
-                        if stats[prev] == 0: del stats[prev]; del first_seen[prev]
+                        if stats[prev] == 0: 
+                            if prev in stats: del stats[prev]
+                            if prev in first_seen: del first_seen[prev]
+                    
                     if i < len(ids) - 2:
                         next_p = (ids[i+1], ids[i+2])
                         stats[next_p] -= freq
                         pair_index[next_p][word_idx] -= 1
                         if pair_index[next_p][word_idx] == 0: del pair_index[next_p][word_idx]
-                        if stats[next_p] == 0: del stats[next_p]; del first_seen[next_p]
+                        if stats[next_p] == 0: 
+                            if next_p in stats: del stats[next_p]
+                            if next_p in first_seen: del first_seen[next_p]
                     
                     new_ids.append(new_id)
                     
@@ -123,6 +135,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                         stats[new_prev] += freq
                         pair_index[new_prev][word_idx] += 1
                         if new_prev not in first_seen: first_seen[new_prev] = word_idx
+                    
                     if i < len(ids) - 2:
                         new_next = (new_id, ids[i+2])
                         stats[new_next] += freq
@@ -133,8 +146,12 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                     new_ids.append(ids[i])
                     i += 1
             word_ids_list[word_idx] = new_ids
-            
-        del stats[best_pair]; del pair_index[best_pair]; del first_seen[best_pair]
+        
+        # 清理
+        if best_pair in stats: del stats[best_pair]
+        if best_pair in pair_index: del pair_index[best_pair]
+        if best_pair in first_seen: del first_seen[best_pair]
+        
         current_vocab_size += 1
         
     return decoder, merges
@@ -189,6 +206,7 @@ class BPE_Tokenizer:
                 pair = (self.vocab[ids[i]], self.vocab[ids[i+1]])
                 if pair in self.merges: stats[pair] = self.merges[pair]
             if not stats: break
+            # encode 时同样使用 min rank
             best_pair = min(stats, key=stats.get)
             p1, p2 = best_pair
             new_id = self.encoder[p1 + p2]
