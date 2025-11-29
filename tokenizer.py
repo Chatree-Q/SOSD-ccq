@@ -49,17 +49,43 @@ def test_bytes_to_unicode_consistency():
 byte_to_unicode = bytes_to_unicode()
 unicode_to_byte = {v: k for k, v in byte_to_unicode.items()}
 
-#def get_pair_stats_optimized(word_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
-#    """
-#    从词频字典中高效地计算所有相邻字节对的频率。
-#    这是优化的关键：我们不遍历整个文本，而是遍历词汇表并乘以其频率。
-#    """
-#    stats = {}
-#    for word, freq in word_freqs.items():
-#        for i in range(len(word) - 1):
-#            pair = (word[i], word[i+1])
-#            stats[pair] = stats.get(pair, 0) + freq
-#    return stats
+def get_word_freqs(data: str) -> Dict[bytes, int]:
+    """
+    预处理文本，返回字节级别的词频统计
+    :param data: 输入文本字符串
+    :return: {bytes词: 频率}
+    """
+    # 复用BPE_Tokenizer的正则模式（需确保与分词逻辑一致）
+    PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    pat = regex.compile(PAT_STR)
+    
+    # 1. 按正则切分文本为基础chunk
+    chunks = pat.findall(data)
+    # 2. 转为字节序列，统计词频
+    word_freqs = {}
+    for chunk in chunks:
+        word_bytes = chunk.encode('utf-8')  # 字符串转字节
+        word_freqs[word_bytes] = word_freqs.get(word_bytes, 0) + 1
+    return word_freqs
+
+
+def get_pair_freq(word_token_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[int, int], int]:
+    """
+    统计token序列中相邻对的频率
+    :param word_token_freqs: {(token_ID序列,): 频率}
+    :return: {(token1_ID, token2_ID): 频率}
+    """
+    pair_freq = {}
+    for token_seq, freq in word_token_freqs.items():
+        if len(token_seq) < 2:
+            continue  # 单个token无相邻对
+        # 遍历相邻token对
+        for i in range(len(token_seq) - 1):
+            pair = (token_seq[i], token_seq[i+1])
+            pair_freq[pair] = pair_freq.get(pair, 0) + freq
+    return pair_freq
+
+
 def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
     stats = defaultdict(int)
     for word, freq in word_freqs.items():
@@ -82,6 +108,30 @@ def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tup
                 i += 1
         new_word_freqs[tuple(new_word)] += freq
     return new_word_freqs
+
+def merge_tokens(word_token_freqs: Dict[Tuple[int, ...], int], 
+                 best_pair: Tuple[int, int], 
+                 new_id: int) -> Dict[Tuple[int, ...], int]:
+    """
+    将词序列中的best_pair替换为new_id，返回更新后的词频
+    """
+    new_word_token_freqs = {}
+    for token_seq, freq in word_token_freqs.items():
+        new_seq = []
+        i = 0
+        while i < len(token_seq):
+            # 匹配到best_pair则替换为new_id，跳过下一个token
+            if i < len(token_seq)-1 and (token_seq[i], token_seq[i+1]) == best_pair:
+                new_seq.append(new_id)
+                i += 2
+            else:
+                new_seq.append(token_seq[i])
+                i += 1
+        # 更新词频（合并相同序列）
+        new_seq_tuple = tuple(new_seq)
+        new_word_token_freqs[new_seq_tuple] = new_word_token_freqs.get(new_seq_tuple, 0) + freq
+    return new_word_token_freqs
+
 
 
 def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[str, ...], int]:
@@ -130,71 +180,63 @@ def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char
 
 # --- Problem 3: BPE 训练函数 ---
 
-
-
-def train_bpe(data, vocab_size, special_tokens):
-    # 初始化：文本转字节序列（整数列表，如"new" → [110, 101, 119]）
-    tokens = list(data.encode('utf-8'))
+def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = None) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+    # 1. 初始化基础映射：单字节token（0-255）
+    encoder: Dict[bytes, int] = {bytes([i]): i for i in range(256)}
+    decoder: Dict[int, bytes] = {i: bytes([i]) for i in range(256)}
     
-    # 初始化vocab：特殊token → ID（优先），单字节 → ID
-    vocab = {}
-    # 1. 添加特殊token
-    for idx, token in enumerate(special_tokens):
-        vocab[token.encode('utf-8')] = idx  # 特殊token转bytes作为键
-    # 2. 添加单字节token（0-255）
-    next_token_id = len(special_tokens)
-    for byte in range(256):
-        vocab[bytes([byte])] = next_token_id
-        next_token_id += 1
     
-    merges = []  # 最终存储(bytes, bytes)格式的合并规则
-    pair_freq = defaultdict(int)
+    # 2. 处理特殊token（添加到映射中）
+    if special_tokens:
+        for token in special_tokens:
+            token_bytes = token.encode('utf-8')
+            if token_bytes not in encoder:
+                new_id = len(encoder)
+                encoder[token_bytes] = new_id
+                decoder[new_id] = token_bytes
     
-    # 初始化pair频率
-    for i in range(len(tokens)-1):
-        pair = (tokens[i], tokens[i+1])
-        pair_freq[pair] += 1
+    # 3. 预处理数据：得到词频（word: bytes，freq: int）
+    word_freqs = get_word_freqs(data)  # 假设你有这个函数，返回{bytes: int}
+    
+    # 4. 将词（bytes）转换为token ID序列
+    word_token_freqs = {}
+    for word, freq in word_freqs.items():
+        # 每个字节转对应的ID（依赖encoder）
+        token_sequence = [encoder[bytes([b])] for b in word]
+        word_token_freqs[tuple(token_sequence)] = freq
+    
+    # 5. 初始化合并规则和统计
+    merges: List[Tuple[bytes, bytes]] = []
+    
+    # 6. BPE合并循环（直到达到目标词汇量）
+    while len(encoder) < vocab_size:
+        pair_freq = get_pair_freq(word_token_freqs)
+        if not pair_freq:
+            break  # 无更多可合并的对
+        
+        # 找到频率最高的token对
+        best_pair = max(pair_freq, key=pair_freq.get)
+        p1_id, p2_id = best_pair
+        
+        # 从decoder中获取ID对应的字节序列
+        p1_bytes = decoder[p1_id]
+        p2_bytes = decoder[p2_id]
+        merged_bytes = p1_bytes + p2_bytes
+        
+        # 添加新token到映射
+        new_id = len(encoder)
+        encoder[merged_bytes] = new_id
+        decoder[new_id] = merged_bytes
+        
+        # 更新合并规则
+        merges.append((p1_bytes, p2_bytes))
+        
+        # 更新词的token序列和频率统计
+        word_token_freqs = merge_tokens(word_token_freqs, best_pair, new_id)
+    
+    # 返回ID→字节的vocab和合并规则
+    return decoder, merges
 
-    while len(vocab) < vocab_size and pair_freq:
-        # 1. 找频率最高的pair（整数对）
-        best_pair = max(pair_freq, key=pair_freq.get)  # 如(101, 32)
-        
-        # 2. 将best_pair转为bytes对，加入merges（匹配测试格式）
-        p1_bytes = bytes([best_pair[0]])
-        p2_bytes = bytes([best_pair[1]])
-        merges.append((p1_bytes, p2_bytes))  # 直接存bytes对，无需后续转换
-        
-        # 3. 新增合并后的token到vocab
-        merged_token = p1_bytes + p2_bytes
-        new_id = next_token_id  # 新ID
-        vocab[merged_token] = new_id
-        next_token_id += 1
-        
-        # 4. 合并token序列（整数列表）
-        new_tokens = []
-        i = 0
-        while i < len(tokens):
-            if i < len(tokens)-1 and (tokens[i], tokens[i+1]) == best_pair:
-                # 用合并后的token的ID？不，这里继续用整数表示（或用新ID，看逻辑）
-                # 注意：如果后续统计需要，这里可以用新ID，但更简单的是暂时用tuple标记，最后统一转bytes
-                new_tokens.append(new_id)  # 或用next_token_id-1（刚分配的ID）
-                i += 2
-            else:
-                new_tokens.append(tokens[i])
-                i += 1
-        tokens = new_tokens
-        
-        # 5. 更新pair频率（优化：清空重统计，小数据量足够快）
-        pair_freq.clear()
-        for i in range(len(tokens)-1):
-            # 处理合并后的token（如果是tuple，转为统一的key）
-            left = tokens[i] if isinstance(tokens[i], int) else tuple(tokens[i])
-            right = tokens[i+1] if isinstance(tokens[i+1], int) else tuple(tokens[i+1])
-            pair_freq[(left, right)] += 1
-
-    # 注意：如果测试需要vocab是ID→token，这里反转
-    # vocab_id_to_token = {v: k for k, v in vocab.items()}
-    return vocab, merges
 
    
 
@@ -203,19 +245,19 @@ def train_bpe(data, vocab_size, special_tokens):
 
 class BPE_Tokenizer:
     def __init__(self, vocab: Dict[int, bytes], merges: List[Tuple[bytes, bytes]], special_tokens: Optional[List[str]] = None):
-        self.vocab = vocab
         # 将 merges 转为字典，值为优先级（越小越优先）
         # 键是 (bytes, bytes)
-        self.merges = {tuple(pair): i for i, pair in enumerate(merges)} 
+        self.merges = {pair: i for i, pair in enumerate(merges)}  
         
         # 预编译正则表达式
         PAT_STR = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         self.pat = regex.compile(PAT_STR)
-
-        # 构建编码器：bytes -> ID
-        self.encoder = {v: k for k, v in vocab.items()}
+        
         # 构建解码器：ID -> bytes
         self.decoder = vocab
+        # 构建编码器：bytes -> ID
+        self.encoder = {v: k for k, v in vocab.items()}
+      
 
         # 处理特殊token
         self.special_tokens = set(special_tokens) if special_tokens else set()
@@ -230,6 +272,11 @@ class BPE_Tokenizer:
                 token_bytes = token_str.encode("utf-8")
                 if token_bytes in self.encoder:
                     self.special_encoder[token_str] = self.encoder[token_bytes]
+                else:
+                    # 这里插入警告/报错逻辑（二选一即可）
+                    # 抛出错误（推荐，强制确保特殊token存在）
+                    raise ValueError(f"Special token '{token_str}' (bytes: {token_bytes}) not found in vocab!")
+  
 
         # 缓存
         self.cache = {}
@@ -259,14 +306,15 @@ class BPE_Tokenizer:
         
         return cls(vocab, merges, special_tokens)
 
-    def save(self, vocab_filepath: str, merges_filepath: str):
+    def save(self, vocab_path: str, merges_path: str):
         # 保存词汇表
         vocab_json_save = {k: v.decode('latin1').encode('unicode_escape').decode('utf-8') for k, v in self.vocab.items()}
         with open(vocab_filepath, 'w', encoding='utf-8') as f:
             json.dump(vocab_json_save, f, ensure_ascii=False, indent=2)
-
         # 保存合并规则
-        with open(merges_filepath, 'w', encoding='utf-8') as f:
+        merges_list = [list(pair) for pair in self.merges.keys()]
+        with open(merges_path, 'w', encoding='utf-8') as f:
+            json.dump(merges_list, f, indent=2)
             for p1, p2 in self.merges.keys():
                  p1_str = p1.decode('latin1').encode('unicode_escape').decode('utf-8')
                  p2_str = p2.decode('latin1').encode('unicode_escape').decode('utf-8')
@@ -388,14 +436,15 @@ if __name__ == '__main__':
     if not os.path.exists(INPUT_PATH):
         print(f"正在生成测试数据到 {INPUT_PATH} ...")
         with open(INPUT_PATH, "w", encoding="utf-8") as f:
+            f.write("low low low low low\n")
+            f.write("lower lower widest widest widest\n")
+            f.write("newest newest newest newest newest newest\n")
+            f.write("This is a simple test. Emoji: 😊. Chinese: 这里有一些中文测试数据。\n")
+            f.write("The quick brown fox jumps over the lazy dog. " * 50)
+        with open(INPUT_PATH, "r", encoding="utf-8") as f:
             data = f.read()  # 读取文件内容
         vocab, merges = train_bpe(data, VOCAB_SIZE, SPECIAL_TOKENS)  # 传入内容而非路径
-        f.write("low low low low low\n")
-        f.write("lower lower widest widest widest\n")
-        f.write("newest newest newest newest newest newest\n")
-        f.write("This is a simple test. Emoji: 😊. Chinese: 这里有一些中文测试数据。\n")
-        f.write("The quick brown fox jumps over the lazy dog. " * 50)
-
+        
     # 训练参数
     VOCAB_SIZE = 500
     SPECIAL_TOKENS = ["<|endoftext|>"]
