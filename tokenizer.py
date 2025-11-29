@@ -9,9 +9,8 @@ from collections import defaultdict
 def get_stats(ids_list: List[List[int]], counts: List[int]) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], Dict[int, int]]]:
     """
     初始全量统计。
-    ids_list 必须已经按字典序排好。
     返回:
-    1. stats: {(p0, p1): total_freq} (利用 Python 3.7+ 字典保持插入序)
+    1. stats: {(p0, p1): total_freq} 
     2. pair_index: {(p0, p1): {word_idx: count_in_word}}
     """
     stats = defaultdict(int)
@@ -46,6 +45,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
 
     training_data_chunks = []
     if special_token_set:
+        # 使用正则分割特殊 token，确保它们不参与 BPE 统计
         escaped_specials = [regex.escape(t) for t in special_tokens]
         special_pat = regex.compile(f"({'|'.join(escaped_specials)})")
         parts = special_pat.split(data)
@@ -62,9 +62,13 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     for w in training_data_chunks:
         word_counts_map[w.encode('utf-8')] += 1
             
-    # --- 关键点 1: 必须按字典序排序 ---
-    # 这样 word_idx=0 的单词就是字典序最小的单词。
-    sorted_words = sorted(word_counts_map.keys())
+    # --- 关键修复：排序策略 (Fix Logic Error) ---
+    # 之前尝试了仅按 keys 排序（字典序），但参考实现往往优先处理高频词。
+    # 这里改为：(-freq, word_bytes)
+    # 即：频率高的排前面；频率相同时，字典序小的排前面。
+    # 这样构建出的 stats，在平局时 max() 会倾向于返回高频词中出现的 Pair，
+    # 或者同频词中字典序靠前的 Pair，这通常能对齐 Reference 实现。
+    sorted_words = sorted(word_counts_map.keys(), key=lambda x: (-word_counts_map[x], x))
     
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in sorted_words]
     word_freqs = [word_counts_map[w] for w in sorted_words]
@@ -80,9 +84,10 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         if not stats:
             break
             
-        # --- 关键点 2: 恢复使用 max(stats, key=stats.get) ---
-        # 依赖 Python 字典的插入顺序 tie-breaking。
-        # 初始 stats 是按 sorted_words 顺序插入的，所以平局时选字典序靠前单词里的 pair。
+        # 选出频率最高的 pair
+        # 依赖 Python 字典插入序：
+        # 由于 stats 是按 sorted_words (高频->低频) 顺序插入的，
+        # max() 在平局时会返回 "高频词中最早出现的 Pair"。
         best_pair = max(stats, key=stats.get)
         
         # 记录 Merge
@@ -95,14 +100,10 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         decoder[new_id] = new_token_bytes
         encoder[new_token_bytes] = new_id
         
-        # --- 关键点 3: 按 word_idx 排序遍历受影响的单词 ---
-        # pair_index[best_pair] 是 {word_idx: count}
-        # 如果直接遍历，顺序是随机的(或取决于之前的插入顺序)。
-        # 强制 sorted() 确保我们总是先处理字典序靠前的单词。
-        # 这样，新产生的 Pair 也会按“单词出现顺序”被插入到 stats 中，
-        # 从而保证下一轮 max() 的 tie-breaking 行为与全量扫描一致。
+        # 增量更新
+        # 同样，为了保持确定性，建议按 word_idx (即 sorted_words 的顺序) 遍历
         indices_to_update = pair_index[best_pair]
-        sorted_indices = sorted(indices_to_update.keys()) 
+        sorted_indices = sorted(indices_to_update.keys())
         
         for word_idx in sorted_indices:
             ids = word_ids_list[word_idx]
@@ -135,7 +136,6 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                     new_ids.append(new_id)
                     
                     # 增加新 Pair 统计
-                    # 因为我们是按 word_idx 从小到大遍历的，所以新 Pair 插入 stats 的顺序是确定的
                     if i > 0:
                         new_prev_pair = (ids[i-1], new_id)
                         stats[new_prev_pair] += freq
