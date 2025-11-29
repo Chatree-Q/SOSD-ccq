@@ -34,7 +34,6 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                 special_token_set.add(token)
 
     # 2. 预处理文本
-    # GPT-2 pre-tokenization regex
     PAT_STR = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     pat = regex.compile(PAT_STR)
 
@@ -50,12 +49,15 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         training_data_chunks = pat.findall(data)
 
     # 3. 统计词频
+    # 使用 defaultdict 保持插入顺序 (Python 3.7+)，这对 Tie-Breaking 至关重要
     word_counts_map = defaultdict(int)
     for w in training_data_chunks:
         word_counts_map[w.encode('utf-8')] += 1
             
-    # 排序：保证处理顺序的确定性
-    sorted_words = sorted(word_counts_map.keys(), key=lambda x: (-word_counts_map[x], x))
+    # 关键修改：不要按频率排序！
+    # 标准 BPE 实现 (minbpe/GPT-2) 在频率相同时，优先选择最早出现的 Pair。
+    # 我们保持 word_counts_map 的原始插入顺序（即文本中出现的顺序）。
+    sorted_words = list(word_counts_map.keys())
     
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in sorted_words]
     word_freqs = [word_counts_map[w] for w in sorted_words]
@@ -68,16 +70,18 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
     
     # 5. 主循环
     while current_vocab_size < vocab_size:
-        # 清理
+        # 清理计数为0的项，防止干扰 min/max 逻辑
         garbage = [k for k, v in stats.items() if v <= 0]
         for k in garbage: del stats[k]
 
         if not stats: break
             
         # --- 关键策略修复 ---
-        # 标准 BPE 实现 (如 GPT-2/MinBPE) 在频率相同时，优先合并字典序靠前的 Pair。
-        # 使用 min 配合 -freq 实现：找频率最高(-freq最小)，且 pair 本身最小(字典序最前)的组合。
-        best_pair = min(stats, key=lambda p: (-stats[p], p))
+        # 1. stats.get 返回频率。
+        # 2. max 寻找最大频率。
+        # 3. 如果频率相同，max 返回 stats 中遍历到的第一个键。
+        # 4. 因为 stats 是按 sorted_words (文本顺序) 插入的，所以这等于 "Max Frequency, First Appearance"。
+        best_pair = max(stats, key=stats.get)
         
         p0, p1 = best_pair
         merges.append((decoder[p0], decoder[p1]))
@@ -123,7 +127,7 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
                     stats[pair] += freq
                     pair_index[pair][word_idx] += 1
         
-        # 确保 best_pair 对应的 entry 从 stats 中移除（虽然计数应为0，但为了安全显式清理）
+        # 确保 best_pair 被清除
         if best_pair in stats: del stats[best_pair]
         
         current_vocab_size += 1
@@ -145,7 +149,7 @@ class BPE_Tokenizer:
                  if t_bytes in self.encoder: self.special_encoder[t] = self.encoder[t_bytes]
             valid_specials = [t for t in self.special_tokens if t in self.special_encoder]
             if valid_specials:
-                # Sort by length desc to match longest special token first
+                # 优先匹配长 token
                 pattern_str = "|".join(map(regex.escape, sorted(valid_specials, key=len, reverse=True)))
                 self.special_pattern = regex.compile(f"({pattern_str})")
         self.cache = {}
@@ -181,7 +185,7 @@ class BPE_Tokenizer:
                 pair = (self.vocab[ids[i]], self.vocab[ids[i+1]])
                 if pair in self.merges: stats[pair] = self.merges[pair]
             if not stats: break
-            # encode 使用 min rank，即最先合并的优先
+            # encode 使用 min rank (merges index)，即最先被学习到的规则优先
             best_pair = min(stats, key=stats.get)
             p1, p2 = best_pair
             new_id = self.encoder[p1 + p2]
@@ -200,8 +204,6 @@ class BPE_Tokenizer:
         if self.special_pattern:
             chunks = self.special_pattern.split(text)
             for i, chunk in enumerate(chunks):
-                # split behavior: [text, special, text, special...]
-                # if capture group used, separators are returned.
                 if i % 2 == 1:
                     if chunk in self.special_encoder: token_ids.append(self.special_encoder[chunk])
                 elif chunk:
