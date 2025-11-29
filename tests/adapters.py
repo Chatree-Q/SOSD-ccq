@@ -18,7 +18,9 @@ import sys
 import os
 # 将当前文件的父目录（即项目根目录）加入 sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tokenizer import BPE_Tokenizer
+
+# 【修改这里】：把 train_bpe 加进来
+from tokenizer import BPE_Tokenizer, train_bpe
 
 def run_linear(
     d_in: int,
@@ -763,86 +765,22 @@ def get_tokenizer(
 
 from collections import defaultdict
 
-def get_stats(ids, counts=None):
-    counts = defaultdict(int) if counts is None else counts
-    for pair in zip(ids[:-1], ids[1:]):
-        counts[pair] += 1
-    return counts
-
-def merge(ids, pair, idx):
-    new_ids = []
-    i = 0
-    while i < len(ids):
-        if i < len(ids) - 1 and ids[i] == pair[0] and ids[i+1] == pair[1]:
-            new_ids.append(idx)
-            i += 2
-        else:
-            new_ids.append(ids[i])
-            i += 1
-    return new_ids
-
-
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    """Given the path to an input corpus, run train a BPE tokenizer and
-    output its vocabulary and merges.
-
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
-
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
     """
-     # 1. 读取文本
+    Given the path to an input corpus, run train a BPE tokenizer using the
+    implementation in tokenizer.py
+    """
+    # 1. 读取文件内容
     with open(input_path, "r", encoding="utf-8") as f:
         text = f.read()
     
-    # 2. 初始词汇表：256个字节 + 特殊token
-    vocab = {i: bytes([i]) for i in range(256)}
-    special_token_ids = {}
-    for i, token in enumerate(special_tokens):
-        idx = 256 + i
-        vocab[idx] = token.encode("utf-8")
-        special_token_ids[token] = idx
-    num_special = len(special_tokens)
-    num_merges = vocab_size - 256 - num_special
-    
-    # 3. 文本转字节ID
-    bytes_ = text.encode("utf-8")
-    ids = list(bytes_)
-    
-    # 4. 迭代合并
-    merges = []
-    counts = get_stats(ids)
-    for _ in range(num_merges):
-        if not counts:
-            break
-        # 找频率最高的pair
-        pair = max(counts, key=counts.get)
-        # 分配新ID
-        new_idx = 256 + num_special + len(merges)
-        # 合并ID
-        ids = merge(ids, pair, new_idx)
-        # 更新vocab和merges
-        vocab[new_idx] = vocab[pair[0]] + vocab[pair[1]]
-        merges.append(pair)
-        # 更新统计
-        counts = get_stats(ids, counts)
+    # 2. 调用我们在 tokenizer.py 里写的（已修复的）函数
+    # 注意：train_bpe 返回 (vocab, merges)
+    vocab, merges = train_bpe(text, vocab_size, special_tokens)
     
     return vocab, merges
