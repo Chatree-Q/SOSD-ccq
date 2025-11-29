@@ -86,28 +86,6 @@ def get_pair_freq(word_token_freqs: Dict[Tuple[int, ...], int]) -> Dict[Tuple[in
     return pair_freq
 
 
-def init_pair_stats(word_freqs: Dict[Tuple[str, ...], int]) -> Dict[Tuple[str, str], int]:
-    stats = defaultdict(int)
-    for word, freq in word_freqs.items():
-        for i in range(len(word)-1):
-            stats[(word[i], word[i+1])] += freq
-    return stats
-
-def merge_word_freqs_optimized(word_freqs: Dict[Tuple[str, ...], int], pair: Tuple[str, str], new_char: str) -> Dict[Tuple[str, ...], int]:
-    new_word_freqs = defaultdict(int)
-    for word, freq in word_freqs.items():
-        new_word = []
-        i = 0
-        n = len(word)
-        while i < n:
-            if i < n-1 and word[i] == pair[0] and word[i+1] == pair[1]:
-                new_word.append(new_char)
-                i += 2
-            else:
-                new_word.append(word[i])
-                i += 1
-        new_word_freqs[tuple(new_word)] += freq
-    return new_word_freqs
 
 def merge_tokens(word_token_freqs: Dict[Tuple[int, ...], int], 
                  best_pair: Tuple[int, int], 
@@ -132,50 +110,6 @@ def merge_tokens(word_token_freqs: Dict[Tuple[int, ...], int],
         new_word_token_freqs[new_seq_tuple] = new_word_token_freqs.get(new_seq_tuple, 0) + freq
     return new_word_token_freqs
 
-
-
-def pretokenize_chunk(text_chunk: str, pat_str: str) -> Dict[Tuple[str, ...], int]:
-    """并行化预分词的工作函数（返回Unicode字符tuple的词频）"""
-    pat = regex.compile(pat_str)
-    word_freqs = defaultdict(int)  # 改为defaultdict(int)
-    for word_str in pat.findall(text_chunk):
-        word_bytes = word_str.encode("utf-8")
-        word_chars = tuple(byte_to_unicode[b] for b in word_bytes)
-        word_freqs[word_chars] += 1
-    return word_freqs
-
-
-def update_pair_stats(word: Tuple[str, ...], old_pair: Tuple[str, str], new_char: str, stats: Dict[Tuple[str, str], int], freq: int):
-    i = 0
-    n = len(word)
-    while i < n:
-        if i < n-1 and word[i] == old_pair[0] and word[i+1] == old_pair[1]:
-            # 移除旧pair
-            if stats[old_pair] >= freq:
-                stats[old_pair] -= freq
-                if stats[old_pair] == 0:
-                    del stats[old_pair]
-            # 更新左侧新pair
-            if i > 0:
-                left_pair = (word[i-1], new_char)
-                stats[left_pair] += freq
-                old_left_pair = (word[i-1], word[i])
-                if stats[old_left_pair] >= freq:
-                    stats[old_left_pair] -= freq
-                    if stats[old_left_pair] == 0:
-                        del stats[old_left_pair]
-            # 更新右侧新pair
-            if i < n-2:
-                right_pair = (new_char, word[i+2])
-                stats[right_pair] += freq
-                old_right_pair = (word[i+1], word[i+2])
-                if stats[old_right_pair] >= freq:
-                    stats[old_right_pair] -= freq
-                    if stats[old_right_pair] == 0:
-                        del stats[old_right_pair]
-            i += 2
-        else:
-            i += 1
             
 
 # --- Problem 3: BPE 训练函数 ---
@@ -309,7 +243,7 @@ class BPE_Tokenizer:
     def save(self, vocab_path: str, merges_path: str):
         # 保存词汇表
         vocab_json_save = {k: v.decode('latin1').encode('unicode_escape').decode('utf-8') for k, v in self.vocab.items()}
-        with open(vocab_filepath, 'w', encoding='utf-8') as f:
+        with open(vocab_path, 'w', encoding='utf-8') as f:
             json.dump(vocab_json_save, f, ensure_ascii=False, indent=2)
         # 保存合并规则
         merges_list = [list(pair) for pair in self.merges.keys()]
@@ -454,7 +388,7 @@ if __name__ == '__main__':
     print("开始训练BPE分词器...")
     start_time = time.time()
     
-    vocab, merges = train_bpe(INPUT_PATH, VOCAB_SIZE, SPECIAL_TOKENS)
+    vocab, merges = train_bpe(data, VOCAB_SIZE, SPECIAL_TOKENS)
     
     end_time = time.time()
     training_time = end_time - start_time
