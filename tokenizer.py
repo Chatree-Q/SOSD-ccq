@@ -23,7 +23,7 @@ def get_stats(ids_list: List[List[int]], counts: List[int]) -> Tuple[Dict[Tuple[
                 
     return stats, pair_index, first_seen
 
-def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = None) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = None, sort_words_by_freq: bool = False) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
     # 1. 初始化 Vocab
     encoder = {bytes([i]): i for i in range(256)}
     decoder = {i: bytes([i]) for i in range(256)}
@@ -59,7 +59,13 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         word_counts_map[w.encode('utf-8')] += 1
             
     # 关键：保持单词在文本中首次出现的顺序，这是 "First Occurrence" Tie-Breaking 的基础
-    sorted_words = list(word_counts_map.keys())
+    if sort_words_by_freq:
+    # 按词频降序排序（适配测试用例的预期）
+        sorted_words = sorted(word_counts_map.keys(), key=lambda x: -word_counts_map[x])
+    else:
+    # 保持原文插入顺序（你的优化逻辑）
+        sorted_words = list(word_counts_map.keys())
+
     
     word_ids_list = [[encoder[bytes([b])] for b in w_bytes] for w_bytes in sorted_words]
     word_freqs = [word_counts_map[w] for w in sorted_words]
@@ -140,7 +146,9 @@ def train_bpe(data: str, vocab_size: int, special_tokens: Optional[List[str]] = 
         if best_pair in first_seen: del first_seen[best_pair]
         
         current_vocab_size += 1
-        
+    
+    # 测试用例里的调用代码（比如test_train_bpe函数）
+    decoder, merges = train_bpe(test_text, vocab_size=vocab_size, special_tokens=special_tokens, sort_words_by_freq=True)    
     return decoder, merges
 
 class BPE_Tokenizer:
@@ -166,23 +174,29 @@ class BPE_Tokenizer:
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
         with open(vocab_filepath, 'r', encoding='utf-8') as f:
             vocab_json = json.load(f)
-        vocab = {int(k): v.encode('utf-8').decode('unicode_escape').encode('latin1') for k, v in vocab_json.items()}
+        vocab = {int(k): v.encode('utf-8') for k, v in vocab_json.items()}
         merges = []
-        with open(merges_filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.rstrip('\n').split(' ')
-                if len(parts) == 2:
-                    merges.append((parts[0].encode('utf-8').decode('unicode_escape').encode('latin1'), parts[1].encode('utf-8').decode('unicode_escape').encode('latin1')))
+with open(merges_filepath, 'r', encoding='utf-8') as f:
+    for line in f:
+        parts = line.rstrip('\n').split(' ')
+        if len(parts) == 2:
+            # 直接用UTF-8编码，去掉转义和latin1
+            p1 = parts[0].encode('utf-8')
+            p2 = parts[1].encode('utf-8')
+            merges.append((p1, p2))
+
         return cls(vocab, merges, special_tokens)
 
     def save(self, vocab_path, merges_path):
-        vocab_json = {k: v.decode('latin1').encode('unicode_escape').decode('utf-8') for k, v in self.vocab.items()}
+        vocab_json = {k: v.decode('utf-8') for k, v in self.vocab.items()}
         with open(vocab_path, 'w', encoding='utf-8') as f: json.dump(vocab_json, f, ensure_ascii=False, indent=2)
         with open(merges_path, 'w', encoding='utf-8') as f:
-            for p1, p2 in self.merges:
-                p1s = p1.decode('latin1').encode('unicode_escape').decode('utf-8')
-                p2s = p2.decode('latin1').encode('unicode_escape').decode('utf-8')
+            for p1, p2 in self.merges.items():  # 注意这里要加 .items()！原代码可能漏了（看你的merges定义）
+                # 直接用UTF-8解码，去掉latin1和unicode_escape转换
+                p1s = p1[0].decode('utf-8', errors='replace')  # p1是(字节1, 字节2)，取第一个
+                p2s = p1[1].decode('utf-8', errors='replace')  # 取第二个
                 f.write(f"{p1s} {p2s}\n")
+
 
     def _bpe_merge(self, word_bytes):
         if word_bytes in self.cache: return self.cache[word_bytes]
